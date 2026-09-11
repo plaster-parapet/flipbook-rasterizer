@@ -758,7 +758,12 @@ html,body{
       img.decoding = 'async';
       img.draggable = false;
       img.alt = 'Page ' + (i + 1);
-      img.src = images[i].src;
+      // Deliberately NOT set here -- see updateImageWindow(). Assigning
+      // every page's full-res src immediately (the original approach) made
+      // the browser decode and hold ALL pages in memory at once, which is
+      // what actually caused laggy flips, independent of DPI: a bigger
+      // per-page image just made a bad architecture worse.
+      img.dataset.src = images[i].src;
       pageImgMap.set(i + 1, img);
 
       inner.appendChild(img);
@@ -794,6 +799,7 @@ html,body{
     var baseWidth = Math.round(baseHeight * aspect);
 
     buildPageElements(images);
+    updateImageWindow(0);
     layoutBookContainer();
 
     pageFlip = new PageFlip(flipbookEl, {
@@ -1006,8 +1012,41 @@ html,body{
     btnRestart.classList.toggle('hidden', !atEnd);
   }
 
+  // ---------------------------------------------------------------------
+  // Image windowing: only the current page +/- IMAGE_WINDOW_RADIUS keeps
+  // its full-res <img src> assigned (and therefore decoded/resident in
+  // memory); everything else has its src cleared. Without this, a
+  // multi-hundred-page PDF would hold every page's full-res bitmap in
+  // memory and the flip animation's compositing cost scales with how many
+  // large image layers exist, not just how many are visible -- this is
+  // what actually caused laggy flips (see buildPageElements). Radius 3
+  // (7 pages resident) comfortably covers a two-page-spread flip's
+  // outgoing+incoming pages with room to spare, while still bounding
+  // memory regardless of total page count.
+  // ---------------------------------------------------------------------
+  var IMAGE_WINDOW_RADIUS = 3;
+
+  function setPageImageLoaded(pageNumber1Based, shouldBeLoaded) {
+    var img = pageImgMap.get(pageNumber1Based);
+    if (!img) return;
+    if (shouldBeLoaded) {
+      if (!img.getAttribute('src')) img.src = img.dataset.src;
+    } else if (img.getAttribute('src')) {
+      img.removeAttribute('src'); // frees the decoded bitmap
+    }
+  }
+
+  function updateImageWindow(centerIndex0Based) {
+    var lo = centerIndex0Based - IMAGE_WINDOW_RADIUS;
+    var hi = centerIndex0Based + IMAGE_WINDOW_RADIUS;
+    for (var i = 0; i < numPages; i++) {
+      setPageImageLoaded(i + 1, i >= lo && i <= hi);
+    }
+  }
+
   function onPageChanged() {
     clearInk(); // every page-change path (flip event, instant jump) runs through here
+    updateImageWindow(currentIndex); // safety net -- the real pre-warm happens before the flip starts, see flipNext/flipPrev/instantGoToIndex
     updateRecenterOffset();
     resetZoomState();
     syncPenCanvasBox();
@@ -1024,6 +1063,7 @@ html,body{
   function instantGoToIndex(targetIndex0Based) {
     if (!pageFlip || !numPages) return;
     var target = Math.max(0, Math.min(numPages - 1, targetIndex0Based));
+    updateImageWindow(target);
     if (zoom !== 1) resetZoomState();
     flipbookEl.classList.add('flipping');
     pageFlip.turnToPage(target);
@@ -1038,6 +1078,7 @@ html,body{
     if (!pageFlip || isAtEnd()) return;
     clearInk();
     if (isTouchPrimary) { instantGoToIndex(currentIndex + spreadStep); return; }
+    updateImageWindow(currentIndex + spreadStep);
     if (zoom !== 1) resetZoomState();
     pageFlip.flipNext();
   }
@@ -1045,6 +1086,7 @@ html,body{
     if (!pageFlip || currentIndex <= 0) return;
     clearInk();
     if (isTouchPrimary) { instantGoToIndex(currentIndex - spreadStep); return; }
+    updateImageWindow(currentIndex - spreadStep);
     if (zoom !== 1) resetZoomState();
     pageFlip.flipPrev();
   }
