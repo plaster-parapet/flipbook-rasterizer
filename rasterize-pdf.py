@@ -32,11 +32,38 @@ except ImportError:
     sys.exit(1)
 
 
-def rasterize(pdf_path: Path, out_dir: Path, dpi: int, fmt: str, quality: int, quiet: bool = False, progress_callback=None):
-    """Rasterizes every page of pdf_path into out_dir. Returns a list of
-    dicts (in page order) -- [{"path": Path, "w": int, "h": int}, ...] --
-    so callers (e.g. build-static-flipbook.py) can embed the results
-    without re-deriving dimensions from the files on disk.
+# The viewer shows this DPI's image for ordinary flipping (all pages, all
+# the time) and only swaps in the full `--dpi` image for the 1-2 pages
+# actually on screen once the user zooms in past 1x. 300 DPI is the value
+# already confirmed smooth for normal flip-through (the "300 DPI is the
+# low end of the crisp linework range" reasoning from before the default
+# was raised to 400 for zoom crispness -- see build-static-flipbook.py's
+# manifest schema for how both tiers get embedded). Keeping the
+# always-loaded tier at this size, instead of at the full zoom DPI, is
+# what actually fixes flip lag -- a windowed *count* of resident images
+# wasn't enough on its own when each one was still a 400+ DPI bitmap.
+DISPLAY_DPI = 300
+
+
+def _render_tier(page, dpi, out_path, fmt, quality):
+    zoom = dpi / 72.0  # PDF user space is 72 DPI by definition
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    if fmt == "jpg":
+        pix.save(out_path, jpg_quality=quality)
+    else:
+        pix.save(out_path)
+    return pix.width, pix.height, out_path.stat().st_size
+
+
+def rasterize(pdf_path: Path, out_dir: Path, dpi: int, fmt: str, quality: int, quiet: bool = False, progress_callback=None, display_dpi: int = DISPLAY_DPI):
+    """Rasterizes every page of pdf_path into out_dir, at TWO resolutions
+    each: a "zoom" tier (dpi -- the full quality used once someone
+    actually zooms in) and a "display" tier (display_dpi -- what's shown
+    the rest of the time, during ordinary flipping). Returns a list of
+    dicts (in page order) -- [{"path": Path, "w": int, "h": int,
+    "display_path": Path, "display_w": int, "display_h": int}, ...] -- so
+    callers (e.g. build-static-flipbook.py) can embed both without
+    re-deriving dimensions from the files on disk.
 
     progress_callback(page_num, num_pages), if given, is called after each
     page finishes -- used by rasterizer_app.py to drive a progress bar
@@ -46,9 +73,6 @@ def rasterize(pdf_path: Path, out_dir: Path, dpi: int, fmt: str, quality: int, q
     pad = len(str(num_pages))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    zoom = dpi / 72.0  # PDF user space is 72 DPI by definition
-    matrix = fitz.Matrix(zoom, zoom)
-
     ext = "jpg" if fmt == "jpg" else "png"
     total_bytes = 0
     t0 = time.time()
@@ -56,17 +80,19 @@ def rasterize(pdf_path: Path, out_dir: Path, dpi: int, fmt: str, quality: int, q
 
     for i in range(num_pages):
         page = doc.load_page(i)
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
         out_path = out_dir / f"page-{i + 1:0{pad}d}.{ext}"
-        if fmt == "jpg":
-            pix.save(out_path, jpg_quality=quality)
-        else:
-            pix.save(out_path)
-        size = out_path.stat().st_size
-        total_bytes += size
-        pages.append({"path": out_path, "w": pix.width, "h": pix.height})
+        w, h, size = _render_tier(page, dpi, out_path, fmt, quality)
+
+        display_out_path = out_dir / f"page-{i + 1:0{pad}d}-display.{ext}"
+        dw, dh, dsize = _render_tier(page, display_dpi, display_out_path, fmt, quality)
+
+        total_bytes += size + dsize
+        pages.append({
+            "path": out_path, "w": w, "h": h,
+            "display_path": display_out_path, "display_w": dw, "display_h": dh,
+        })
         if not quiet:
-            print(f"  page {i + 1}/{num_pages}: {pix.width}x{pix.height}px, {size / 1e6:.2f}MB")
+            print(f"  page {i + 1}/{num_pages}: {w}x{h}px zoom ({size / 1e6:.2f}MB) + {dw}x{dh}px display ({dsize / 1e6:.2f}MB)")
         if progress_callback:
             progress_callback(i + 1, num_pages)
 
@@ -81,7 +107,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pdf", type=Path, help="Path to the source PDF")
     parser.add_argument("out_dir", type=Path, nargs="?", default=None, help="Output folder (default: <pdf-name>-pages)")
-    parser.add_argument("--dpi", type=int, default=400, help="Render DPI (default: 400 -- stays crisp at the viewer's 4x max zoom; see module docstring)")
+    parser.add_argument("--dpi", type=int, default=400, help="Zoom-tier render DPI (default: 400 -- stays crisp at the viewer's 4x max zoom; see module docstring)")
+    parser.add_argument("--display-dpi", type=int, default=DISPLAY_DPI, help=f"Display-tier render DPI, used for ordinary flipping (default: {DISPLAY_DPI} -- keeps flips smooth; see module docstring)")
     parser.add_argument("--format", choices=["jpg", "png"], default="jpg", help="Image format (default: jpg)")
     parser.add_argument("--quality", type=int, default=92, help="JPEG quality 0-100 (default: 92; ignored for png)")
     args = parser.parse_args()
@@ -91,8 +118,8 @@ def main():
         sys.exit(1)
 
     out_dir = args.out_dir or args.pdf.with_name(args.pdf.stem + "-pages")
-    print(f"Rasterizing {args.pdf.name} -> {out_dir} at {args.dpi} DPI ({args.format}, q={args.quality})")
-    rasterize(args.pdf, out_dir, args.dpi, args.format, args.quality)
+    print(f"Rasterizing {args.pdf.name} -> {out_dir} at {args.dpi} DPI zoom / {args.display_dpi} DPI display ({args.format}, q={args.quality})")
+    rasterize(args.pdf, out_dir, args.dpi, args.format, args.quality, display_dpi=args.display_dpi)
 
 
 if __name__ == "__main__":

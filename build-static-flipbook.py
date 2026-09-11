@@ -52,22 +52,34 @@ def _load_rasterize_module():
 MIME_BY_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 
 
-def images_dir_to_pages(images_dir: Path):
-    """Reads an existing folder of rasterize-pdf.py output (or anything
-    with the same page-NN.ext naming) and returns [{"path": Path, "w":
-    int, "h": int}, ...] in page order, deriving dimensions from each
-    file's own JPEG/PNG header instead of assuming rasterize-pdf.py's
-    return value is available (it isn't, when starting from a folder that
-    was produced in a separate run)."""
+def _image_size(p: Path):
     try:
         from PIL import Image
-        have_pil = True
+        with Image.open(p) as im:
+            return im.size
     except ImportError:
-        have_pil = False
+        # Fall back to PyMuPDF (already a dependency of rasterize-pdf.py)
+        # to read dimensions if Pillow isn't installed.
+        import fitz
+        with fitz.open(p) as im:
+            pix = im[0].get_pixmap()
+            return pix.width, pix.height
 
+
+def images_dir_to_pages(images_dir: Path):
+    """Reads an existing folder of rasterize-pdf.py output (or anything
+    with the same page-NN[-display].ext naming) and returns [{"path": Path,
+    "w": int, "h": int, "display_path": Path, "display_w": int,
+    "display_h": int}, ...] in page order, deriving dimensions from each
+    file's own JPEG/PNG header instead of assuming rasterize-pdf.py's
+    return value is available (it isn't, when starting from a folder that
+    was produced in a separate run). Every zoom-tier file (page-NN.ext)
+    must have a matching display-tier sibling (page-NN-display.ext) --
+    rasterize-pdf.py always writes both, so a missing one means a folder
+    from before the two-tier change, or a manually-edited folder."""
     files = sorted(
         p for p in images_dir.iterdir()
-        if p.suffix.lower() in MIME_BY_EXT
+        if p.suffix.lower() in MIME_BY_EXT and not p.stem.endswith("-display")
     )
     if not files:
         print(f"No page images found in {images_dir}", file=sys.stderr)
@@ -75,17 +87,17 @@ def images_dir_to_pages(images_dir: Path):
 
     pages = []
     for p in files:
-        if have_pil:
-            with Image.open(p) as im:
-                w, h = im.size
-        else:
-            # Fall back to PyMuPDF (already a dependency of rasterize-pdf.py)
-            # to read dimensions if Pillow isn't installed.
-            import fitz
-            with fitz.open(p) as im:
-                pix = im[0].get_pixmap()
-                w, h = pix.width, pix.height
-        pages.append({"path": p, "w": w, "h": h})
+        display_p = p.with_name(f"{p.stem}-display{p.suffix}")
+        if not display_p.exists():
+            print(
+                f"Missing display-tier image: {display_p} (expected next to {p}) -- "
+                "re-run rasterize-pdf.py on this PDF to regenerate both tiers.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        w, h = _image_size(p)
+        dw, dh = _image_size(display_p)
+        pages.append({"path": p, "w": w, "h": h, "display_path": display_p, "display_w": dw, "display_h": dh})
     return pages
 
 
@@ -94,11 +106,19 @@ def build_manifest(pages):
     total_bytes = 0
     for page in pages:
         path = page["path"]
+        display_path = page["display_path"]
         mime = MIME_BY_EXT.get(path.suffix.lower(), "image/jpeg")
+        display_mime = MIME_BY_EXT.get(display_path.suffix.lower(), "image/jpeg")
         data = path.read_bytes()
-        total_bytes += len(data)
+        display_data = display_path.read_bytes()
+        total_bytes += len(data) + len(display_data)
         b64 = base64.b64encode(data).decode("ascii")
-        manifest.append({"src": f"data:{mime};base64,{b64}", "w": page["w"], "h": page["h"]})
+        display_b64 = base64.b64encode(display_data).decode("ascii")
+        manifest.append({
+            "src": f"data:{display_mime};base64,{display_b64}",
+            "zoomSrc": f"data:{mime};base64,{b64}",
+            "w": page["w"], "h": page["h"],
+        })
     return manifest, total_bytes
 
 
@@ -121,7 +141,8 @@ def main():
     parser.add_argument("pdf", type=Path, nargs="?", help="Path to the source PDF (omit if using --images-dir)")
     parser.add_argument("output", type=Path, nargs="?", default=None, help="Output .html path (default: <name>-flipbook.html)")
     parser.add_argument("--images-dir", type=Path, default=None, help="Use an already-rasterized folder instead of a PDF")
-    parser.add_argument("--dpi", type=int, default=400, help="Render DPI when rasterizing a PDF (default: 400 -- see rasterize-pdf.py's docstring)")
+    parser.add_argument("--dpi", type=int, default=400, help="Zoom-tier render DPI when rasterizing a PDF (default: 400 -- see rasterize-pdf.py's docstring)")
+    parser.add_argument("--display-dpi", type=int, default=None, help="Display-tier render DPI when rasterizing a PDF (default: rasterize-pdf.py's own default, 300)")
     parser.add_argument("--format", choices=["jpg", "png"], default="jpg", help="Image format when rasterizing a PDF (default: jpg)")
     parser.add_argument("--quality", type=int, default=92, help="JPEG quality when rasterizing a PDF (default: 92)")
     parser.add_argument("--no-keep-images", action="store_true", help="Delete the intermediate rasterized-images folder after packaging (default: keep it)")
@@ -151,8 +172,9 @@ def main():
         source_dir = args.pdf.parent
         images_dir = args.pdf.with_name(args.pdf.stem + "-pages")
         rasterize_pdf = _load_rasterize_module()
-        print(f"Rasterizing {args.pdf.name} at {args.dpi} DPI ({args.format}, q={args.quality})...")
-        pages = rasterize_pdf.rasterize(args.pdf, images_dir, args.dpi, args.format, args.quality)
+        display_dpi = args.display_dpi if args.display_dpi is not None else rasterize_pdf.DISPLAY_DPI
+        print(f"Rasterizing {args.pdf.name} at {args.dpi} DPI zoom / {display_dpi} DPI display ({args.format}, q={args.quality})...")
+        pages = rasterize_pdf.rasterize(args.pdf, images_dir, args.dpi, args.format, args.quality, display_dpi=display_dpi)
         print(f"Rasterized {len(pages)} pages -> {images_dir}")
         if args.no_keep_images:
             images_dir_to_clean = images_dir

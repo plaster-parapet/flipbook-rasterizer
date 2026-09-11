@@ -227,6 +227,14 @@ html,body{
 .pf-page{
   background:#fff;
   overflow:hidden;
+  /* A brief blank/flash at the start of a flip was reported even on the
+     already-shipped single-tier viewer -- a known artifact of 3D CSS
+     transforms where the browser hasn't promoted the flipping element to
+     its own GPU layer yet when the transform starts. These hints ask for
+     that promotion up front instead of triggering it reactively. */
+  backface-visibility:hidden;
+  -webkit-backface-visibility:hidden;
+  transform:translateZ(0);
 }
 .pf-page-inner{
   position:relative;
@@ -749,6 +757,14 @@ html,body{
       var page = document.createElement('div');
       page.className = 'pf-page';
       page.dataset.pageNumber = String(i + 1);
+      // "hard" density skips StPageFlip's realistic paper-curl animation,
+      // which (per its own source) works by cloning the whole page element
+      // -- including a fresh <img> that has to redecode -- for the
+      // duration of the flip. That clone/redecode was confirmed as the
+      // cause of page images visibly flashing in during a flip; "hard"
+      // density flips the page as a simple rigid rotation on the original
+      // element instead, no clone, at the cost of the bendy-paper look.
+      page.dataset.density = 'hard';
 
       var inner = document.createElement('div');
       inner.className = 'pf-page-inner';
@@ -758,12 +774,17 @@ html,body{
       img.decoding = 'async';
       img.draggable = false;
       img.alt = 'Page ' + (i + 1);
-      // Deliberately NOT set here -- see updateImageWindow(). Assigning
-      // every page's full-res src immediately (the original approach) made
-      // the browser decode and hold ALL pages in memory at once, which is
-      // what actually caused laggy flips, independent of DPI: a bigger
-      // per-page image just made a bad architecture worse.
+      // img.dataset.src is the DISPLAY tier (smaller, always used for
+      // ordinary flipping) and img.dataset.zoomSrc is the ZOOM tier
+      // (full-res, swapped in only for the page(s) actually on screen once
+      // zoom > 1 -- see updateVisibleImageTier()). Deliberately not
+      // assigning either as the real `src` here -- see updateImageWindow().
+      // Assigning every page's image immediately at build time (the
+      // original approach) made the browser decode and hold ALL pages in
+      // memory at once; that, not DPI itself, is what caused laggy flips --
+      // a bigger per-page image just made a bad architecture worse.
       img.dataset.src = images[i].src;
+      img.dataset.zoomSrc = images[i].zoomSrc;
       pageImgMap.set(i + 1, img);
 
       inner.appendChild(img);
@@ -982,9 +1003,29 @@ html,body{
     return visible;
   }
 
+  // detectDominantColor's canvas downscale of a multi-megapixel source
+  // image is genuinely expensive (confirmed: reproducibly stalls the main
+  // thread for the better part of a second) -- calling it synchronously
+  // from onPageChanged(), which fires right as the flip animation settles,
+  // is what made flips visibly hang right at the end. Deferring it past
+  // the current frame (setTimeout(...,0)) lets the just-finished flip
+  // actually paint before the expensive work runs, and caching per page
+  // means it only ever pays that cost once per page for the life of the
+  // session, not on every single revisit.
+  var penColorCache = {};
+
   function updatePenColorForCurrentPage() {
-    var detected = detectDominantColor(getVisiblePageImages());
-    PEN_COLOR = detected || DEFAULT_PEN_COLOR;
+    if (penColorCache.hasOwnProperty(currentIndex)) {
+      PEN_COLOR = penColorCache[currentIndex];
+      return;
+    }
+    var indexAtCall = currentIndex;
+    window.setTimeout(function () {
+      var detected = detectDominantColor(getVisiblePageImages());
+      var color = detected || DEFAULT_PEN_COLOR;
+      penColorCache[indexAtCall] = color;
+      if (currentIndex === indexAtCall) PEN_COLOR = color;
+    }, 0);
   }
 
   function updatePageIndicator() {
@@ -1014,34 +1055,67 @@ html,body{
 
   // ---------------------------------------------------------------------
   // Image windowing: only the current page +/- IMAGE_WINDOW_RADIUS keeps
-  // its full-res <img src> assigned (and therefore decoded/resident in
+  // its display-tier <img src> assigned (and therefore decoded/resident in
   // memory); everything else has its src cleared. Without this, a
-  // multi-hundred-page PDF would hold every page's full-res bitmap in
-  // memory and the flip animation's compositing cost scales with how many
-  // large image layers exist, not just how many are visible -- this is
-  // what actually caused laggy flips (see buildPageElements). Radius 3
-  // (7 pages resident) comfortably covers a two-page-spread flip's
-  // outgoing+incoming pages with room to spare, while still bounding
-  // memory regardless of total page count.
+  // multi-hundred-page PDF would hold every page's bitmap in memory at
+  // once regardless of DPI. Radius 3 (7 pages resident) comfortably covers
+  // a two-page-spread flip's outgoing+incoming pages with room to spare.
+  //
+  // Loading (for pages entering the window) always happens immediately --
+  // the target page must be ready before/as the flip animation starts.
+  // Eviction (for pages leaving the window) is deliberately DEFERRED past
+  // FLIP_SETTLE_MS: removing an <img src> while StPageFlip's CSS transform
+  // was still actively running on nearby page elements was reproduced as a
+  // hung/stuck-looking flip animation. Waiting until well after the
+  // animation has settled avoids touching the DOM mid-transition.
   // ---------------------------------------------------------------------
   var IMAGE_WINDOW_RADIUS = 3;
+  var FLIP_SETTLE_MS = 450; // > the 350ms flippingTime passed to `new PageFlip(...)`
+  var evictTimer = null;
 
-  function setPageImageLoaded(pageNumber1Based, shouldBeLoaded) {
-    var img = pageImgMap.get(pageNumber1Based);
-    if (!img) return;
-    if (shouldBeLoaded) {
-      if (!img.getAttribute('src')) img.src = img.dataset.src;
-    } else if (img.getAttribute('src')) {
-      img.removeAttribute('src'); // frees the decoded bitmap
+  function loadWindow(centerIndex0Based) {
+    var lo = centerIndex0Based - IMAGE_WINDOW_RADIUS;
+    var hi = centerIndex0Based + IMAGE_WINDOW_RADIUS;
+    for (var i = Math.max(0, lo); i <= Math.min(numPages - 1, hi); i++) {
+      var img = pageImgMap.get(i + 1);
+      if (img && !img.getAttribute('src')) img.src = img.dataset.src;
+    }
+  }
+
+  function evictOutsideWindow(centerIndex0Based) {
+    var lo = centerIndex0Based - IMAGE_WINDOW_RADIUS;
+    var hi = centerIndex0Based + IMAGE_WINDOW_RADIUS;
+    for (var i = 0; i < numPages; i++) {
+      if (i >= lo && i <= hi) continue;
+      var img = pageImgMap.get(i + 1);
+      if (img && img.getAttribute('src')) img.removeAttribute('src'); // frees the decoded bitmap
     }
   }
 
   function updateImageWindow(centerIndex0Based) {
-    var lo = centerIndex0Based - IMAGE_WINDOW_RADIUS;
-    var hi = centerIndex0Based + IMAGE_WINDOW_RADIUS;
-    for (var i = 0; i < numPages; i++) {
-      setPageImageLoaded(i + 1, i >= lo && i <= hi);
-    }
+    loadWindow(centerIndex0Based);
+    window.clearTimeout(evictTimer);
+    evictTimer = window.setTimeout(function () { evictOutsideWindow(centerIndex0Based); }, FLIP_SETTLE_MS);
+  }
+
+  // ---------------------------------------------------------------------
+  // Zoom-tier swap: the page(s) actually on screen show their DISPLAY-tier
+  // image (dataset.src) normally, and swap to the full-res ZOOM tier
+  // (dataset.zoomSrc) only while zoom > 1 -- see updateZoomUi(). This is
+  // what keeps ordinary flipping cheap (small images) while still giving
+  // real crispness on demand (only 1-2 pages ever pay the full-res cost).
+  // ---------------------------------------------------------------------
+  function setPageImageTier(pageNumber1Based, useZoomTier) {
+    var img = pageImgMap.get(pageNumber1Based);
+    if (!img) return;
+    var wantSrc = useZoomTier ? img.dataset.zoomSrc : img.dataset.src;
+    if (wantSrc && img.getAttribute('src') !== wantSrc) img.src = wantSrc;
+  }
+
+  function updateVisibleImageTier() {
+    var useZoom = zoom > 1;
+    setPageImageTier(currentIndex + 1, useZoom);
+    setPageImageTier(currentIndex + 2, useZoom);
   }
 
   function onPageChanged() {
@@ -1143,6 +1217,7 @@ html,body{
     btnZoomOut.disabled = zoom <= MIN_ZOOM + 0.001;
     btnZoomIn.disabled = zoom >= MAX_ZOOM - 0.001;
     viewportEl.classList.toggle('zoomed', zoom > 1);
+    updateVisibleImageTier();
   }
 
   function setZoom(newZoom, animate) {
