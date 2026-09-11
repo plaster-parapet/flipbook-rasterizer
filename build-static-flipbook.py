@@ -35,6 +35,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 TEMPLATE_PATH = HERE / "index-pen-static.html"
 MANIFEST_ANCHOR = "/*__PAGE_MANIFEST__*/ null"
+IS_PACKAGED_ANCHOR = "/*__IS_PACKAGED__*/ false"
 
 # rasterize-pdf.py has a hyphen in its filename, so it can't be imported
 # with a plain `import` statement -- load it by file path instead. This
@@ -124,7 +125,7 @@ def build_manifest(pages):
 
 def package(manifest, output_html: Path):
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    if template.count(MANIFEST_ANCHOR) != 1:
+    if template.count(MANIFEST_ANCHOR) != 1 or template.count(IS_PACKAGED_ANCHOR) != 1:
         print(
             f"Template anchor not found (or not unique) in {TEMPLATE_PATH} -- "
             "has index-pen-static.html been edited since this script was written?",
@@ -133,6 +134,7 @@ def package(manifest, output_html: Path):
         sys.exit(1)
     manifest_json = json.dumps(manifest)
     final_html = template.replace(MANIFEST_ANCHOR, f"/*__PAGE_MANIFEST__*/ {manifest_json}")
+    final_html = final_html.replace(IS_PACKAGED_ANCHOR, "/*__IS_PACKAGED__*/ true")
     output_html.write_text(final_html, encoding="utf-8")
 
 

@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Flipbook Viewer</title>
+<script>
+  // Runs synchronously in <head>, before <body> is parsed/painted, so
+  // dev-only UI (the "Open Images" button, the folder-picker hint) never
+  // has a chance to flash visible on a packaged flipbook before later JS
+  // gets around to hiding it -- see the html.packaged CSS rules below and
+  // build-static-flipbook.py's IS_PACKAGED_ANCHOR for how this gets set to
+  // true at packaging time (stays false in the bare/dev template).
+  if (/*__IS_PACKAGED__*/ false) document.documentElement.classList.add('packaged');
+</script>
 <style>
 :root{
   --bg:#15171c;
@@ -113,6 +122,17 @@ html,body{
 }
 
 .restart-btn.hidden{display:none;}
+/* A deployed/packaged flipbook has no use for "Open Images" (its
+   file/folder picker only means anything against the bare template
+   during local dev/testing) -- a site visitor shouldn't see an
+   invitation to load their own images into someone else's portfolio.
+   visibility (not display:none) keeps the button's layout space intact
+   so the toolbar's centered page-jump block doesn't shift off-center.
+   html.packaged is set synchronously in <head>, before body paint --
+   see IS_PACKAGED -- so there's no flash of the button before this
+   applies, unlike toggling it later from a body script would cause. */
+html.packaged #btnLoad{visibility:hidden;}
+html.packaged #dropHint{display:none;}
 
 .zoom-controls{
   display:flex;
@@ -1459,6 +1479,9 @@ html,body{
   // ---------------------------------------------------------------------
   // Auto-load the bundled pages, if this file was produced by
   // build-static-flipbook.py (EMBEDDED_MANIFEST non-null in that case).
+  // "Open Images" itself is hidden earlier, synchronously in <head> (see
+  // IS_PACKAGED) -- by the time this runs the button was never visible to
+  // begin with, so there's nothing left to do for it here.
   // ---------------------------------------------------------------------
   if (EMBEDDED_MANIFEST && EMBEDDED_MANIFEST.length) {
     showLoading('Loading portfolio…');
