@@ -1,0 +1,44 @@
+name: Build Windows executable
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rasterizer_app.py"
+      - "rasterize-pdf.py"
+      - "build-static-flipbook.py"
+      - "index-pen-static.html"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install pymupdf pyinstaller
+
+      # --onefile is the right default on Windows (unlike macOS, where it
+      # conflicts with --windowed .app bundling -- see the macOS build
+      # instructions in README.md) -- produces a single portable .exe with
+      # no installer needed, matching this project's "keep it free and
+      # simple" decision (see NEXT-STEPS-DESKTOP-APP.md task 5).
+      - name: Build with PyInstaller
+        run: >
+          pyinstaller --name "Flipbook Rasterizer" --windowed --onefile
+          --add-data "rasterize-pdf.py;."
+          --add-data "build-static-flipbook.py;."
+          --add-data "index-pen-static.html;."
+          --hidden-import fitz --collect-all fitz
+          rasterizer_app.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Flipbook-Rasterizer-Windows
+          path: dist/Flipbook Rasterizer.exe

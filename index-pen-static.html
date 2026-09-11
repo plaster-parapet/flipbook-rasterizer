@@ -1,0 +1,1354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Flipbook Viewer</title>
+<style>
+:root{
+  --bg:#15171c;
+  --toolbar-bg:#1d2027;
+  --toolbar-border:#2c3038;
+  --text:#e8e9ec;
+  --text-dim:#9096a3;
+  --accent:#4f8cff;
+  --btn-bg:#262a33;
+  --btn-bg-hover:#323744;
+  --btn-bg-active:#3a4050;
+}
+
+*{box-sizing:border-box;}
+
+html,body{
+  margin:0;
+  padding:0;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+  background:var(--bg);
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-user-select:none;
+  user-select:none;
+  touch-action:none;
+  overscroll-behavior:none;
+}
+
+#app{
+  position:fixed;
+  inset:0;
+  display:flex;
+  flex-direction:column;
+}
+
+/* ---------- Toolbar ---------- */
+#toolbar{
+  flex:0 0 auto;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 12px;
+  background:var(--toolbar-bg);
+  border-bottom:1px solid var(--toolbar-border);
+  z-index:20;
+  min-height:52px;
+}
+
+.spacer{flex:1 1 auto;}
+
+.tbtn{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  background:var(--btn-bg);
+  color:var(--text);
+  border:1px solid var(--toolbar-border);
+  border-radius:8px;
+  padding:8px 12px;
+  font-size:14px;
+  cursor:pointer;
+  white-space:nowrap;
+  transition:background .15s ease;
+}
+.tbtn:hover{background:var(--btn-bg-hover);}
+.tbtn:active{background:var(--btn-bg-active);}
+.tbtn.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+.tbtn.primary:hover{filter:brightness(1.08);}
+.tbtn:disabled{opacity:.4;cursor:default;}
+.tbtn.active{background:#1f9d55;border-color:#1f9d55;color:#fff;}
+.tbtn.active:hover{filter:brightness(1.08);}
+
+.page-indicator{
+  font-size:13px;
+  color:var(--text-dim);
+  min-width:70px;
+  text-align:center;
+  flex:0 0 auto;
+}
+
+.page-jump{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-size:13px;
+  color:var(--text-dim);
+  flex:0 0 auto;
+  white-space:nowrap;
+}
+.page-jump input{
+  width:52px;
+  background:var(--btn-bg);
+  border:1px solid var(--toolbar-border);
+  border-radius:6px;
+  color:var(--text);
+  font-size:13px;
+  text-align:center;
+  padding:6px 4px;
+  -moz-appearance:textfield;
+}
+.page-jump input::-webkit-outer-spin-button,
+.page-jump input::-webkit-inner-spin-button{
+  -webkit-appearance:none;
+  margin:0;
+}
+
+.restart-btn.hidden{display:none;}
+
+.zoom-controls{
+  display:flex;
+  align-items:center;
+  gap:4px;
+  flex:0 0 auto;
+}
+.zoom-controls .tbtn{
+  padding:8px 10px;
+  min-width:38px;
+  justify-content:center;
+  font-variant-numeric:tabular-nums;
+}
+#btnZoomReset{min-width:56px;font-size:12px;}
+
+/* ---------- Stage ---------- */
+#stage{
+  position:relative;
+  flex:1 1 auto;
+  min-height:0;
+  overflow:hidden;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+#dropHint{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index:5;
+  padding:24px;
+}
+#dropHint.hidden{display:none;}
+.hint-card{
+  text-align:center;
+  max-width:360px;
+  padding:32px 28px;
+  border:1.5px dashed var(--toolbar-border);
+  border-radius:16px;
+  background:rgba(255,255,255,.02);
+}
+.hint-card p{margin:0 0 16px;color:var(--text-dim);font-size:14px;line-height:1.5;}
+.hint-card .hint-sub{margin:16px 0 0;font-size:12px;}
+
+#viewport{
+  position:absolute;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+  touch-action:none;
+  padding:28px;
+}
+
+/* #flipbook is given an exact pixel width/height by layoutBookContainer()
+   rather than filling #viewport: StPageFlip's real flipPrev() animation has
+   a hardcoded-coordinate bug that only shows up when there's leftover
+   centering slack, so the container is sized to an exact multiple of one
+   page's width instead. #zoomLayer just shrink-wraps to #flipbook's size;
+   #viewport's flexbox centers it. */
+#zoomLayer{
+  will-change:transform;
+  transform-origin:center center;
+}
+#zoomLayer.dragging{transition:none !important;}
+#zoomLayer.animated{transition:transform .18s ease-out;}
+
+/* Ink overlay: a child of #zoomLayer (sibling of #flipbook), not a sibling
+   of #zoomLayer — deliberate. #zoomLayer's own transform (pan + scale, see
+   applyTransform) makes it a containing block for absolutely-positioned
+   descendants, so inset:0 + width/height:100% here exactly overlays
+   #flipbook and rides along with every pan/zoom change automatically via
+   inherited transform. Backing-store size still needs a JS resync (see
+   syncPenCanvasBox) but position doesn't. */
+#penCanvas{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  pointer-events:none;
+  z-index:8;
+}
+#penCanvas.pen-active{
+  pointer-events:auto;
+  cursor:crosshair;
+}
+
+#flipbook{
+  box-shadow:0 20px 60px rgba(0,0,0,.55);
+  transition:opacity .12s ease;
+}
+/* Used only for the instant jump-to-page/restart cut, which has no natural
+   animation of its own to hint that something changed. */
+#flipbook.flipping{opacity:.45;}
+
+/* StPageFlip sets an inline min-width/min-height, equal to our `minWidth`/
+   `minHeight` settings, directly on #flipbook itself (it gets class
+   .stf__parent). We deliberately pass a huge minWidth for pre-made-spread
+   pages to force single-page mode regardless of screen size — neutralize
+   the resulting inline style here so it can't blow out the real layout.
+   !important is required to win over an inline style. */
+.stf__parent{
+  min-width:0 !important;
+  min-height:0 !important;
+}
+
+/* individual page rendered by StPageFlip */
+.pf-page{
+  background:#fff;
+  overflow:hidden;
+}
+.pf-page-inner{
+  position:relative;
+  width:100%;
+  height:100%;
+}
+.page-img{
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  -webkit-user-drag:none;
+}
+
+/* ---------- Nav arrows ---------- */
+.nav-arrow{
+  position:absolute;
+  top:50%;
+  transform:translateY(-50%);
+  width:44px;
+  height:44px;
+  border-radius:50%;
+  border:none;
+  background:rgba(20,22,28,.45);
+  color:#fff;
+  font-size:22px;
+  line-height:1;
+  cursor:pointer;
+  z-index:15;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  backdrop-filter:blur(2px);
+  transition:background .15s ease,opacity .15s ease;
+}
+.nav-arrow:hover{background:rgba(20,22,28,.7);}
+.nav-arrow.left{left:14px;}
+.nav-arrow.right{right:14px;}
+.nav-arrow.hidden{display:none;}
+.nav-arrow:disabled{opacity:.25;cursor:default;}
+
+#toolbar.disabled{pointer-events:none;opacity:.5;}
+
+/* ---------- Loading overlay ---------- */
+#loadingOverlay{
+  position:absolute;
+  inset:0;
+  z-index:30;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:14px;
+  background:rgba(15,17,20,.72);
+}
+#loadingOverlay.hidden{display:none;}
+.spinner{
+  width:34px;
+  height:34px;
+  border-radius:50%;
+  border:3px solid rgba(255,255,255,.2);
+  border-top-color:var(--accent);
+  animation:spin .8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg);}}
+#loadingText{font-size:13px;color:var(--text-dim);}
+
+/* ---------- Responsive ---------- */
+@media (max-width:640px){
+  #toolbar{padding:6px 8px;gap:4px;}
+  .tbtn .label{display:none;}
+  .tbtn{padding:9px;min-width:38px;justify-content:center;}
+  .tbtn.primary .label{display:inline;}
+  .tbtn.primary{padding:10px 16px;}
+  .page-indicator{min-width:54px;font-size:11px;}
+  .nav-arrow{width:38px;height:38px;font-size:18px;}
+  .nav-arrow.left{left:6px;}
+  .nav-arrow.right{right:6px;}
+}
+
+</style>
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar">
+      <button id="btnLoad" class="tbtn" title="Open pre-rendered page images"> <span class="label">Open Images</span></button>
+      <input type="file" id="fileInput" accept="image/*" multiple webkitdirectory hidden>
+
+      <div class="spacer"></div>
+      <div class="page-jump" id="pageJumpWrap">
+        <span>Page</span>
+        <input type="number" id="pageJumpInput" min="1" step="1" inputmode="numeric" title="Jump to page">
+        <span id="pageTotalLabel">of –</span>
+      </div>
+      <div class="spacer"></div>
+
+      <button id="btnRestart" class="tbtn restart-btn hidden" title="Back to first page">⟲ <span class="label">Restart</span></button>
+
+      <div class="zoom-controls">
+        <button id="btnPenToggle" class="tbtn" title="Toggle pen tool (P)">🖊 <span class="label">Pen</span></button>
+        <button id="btnPenWeight" class="tbtn" title="Toggle line weight">Thin</button>
+      </div>
+
+      <div class="zoom-controls">
+        <button id="btnZoomOut" class="tbtn" title="Zoom out (Ctrl/Cmd −)">−</button>
+        <button id="btnZoomReset" class="tbtn" title="Reset zoom">100%</button>
+        <button id="btnZoomIn" class="tbtn" title="Zoom in (Ctrl/Cmd +)">+</button>
+      </div>
+    </header>
+
+    <main id="stage">
+      <div id="dropHint">
+        <div class="hint-card">
+          <p>Choose a folder of pre-rendered page images (from rasterize-pdf.py) to view it as an interactive flipbook.</p>
+          <button id="btnLoad2" class="tbtn primary"><span class="label">Choose Folder</span></button>
+          <p class="hint-sub">or drag &amp; drop the page images anywhere on this page</p>
+        </div>
+      </div>
+
+      <div id="viewport">
+        <div id="zoomLayer" class="animated">
+          <div id="flipbook"></div>
+          <canvas id="penCanvas"></canvas>
+        </div>
+      </div>
+
+      <button id="navPrev" class="nav-arrow left" aria-label="Previous page">‹</button>
+      <button id="navNext" class="nav-arrow right" aria-label="Next page">›</button>
+
+      <div id="loadingOverlay" class="hidden">
+        <div class="spinner"></div>
+        <div id="loadingText">Loading…</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ============ Vendor library (embedded for offline / file:// use) ============ -->
+
+  <!-- StPageFlip (page-turn UI) -->
+  <script>
+!function(t,e){"object"==typeof exports&&"undefined"!=typeof module?e(exports):"function"==typeof define&&define.amd?define(["exports"],e):e((t=t||self).St={})}(this,(function(t){"use strict";class e{constructor(t,e){this.state={angle:0,area:[],position:{x:0,y:0},hardAngle:0,hardDrawingAngle:0},this.createdDensity=e,this.nowDrawingDensity=this.createdDensity,this.render=t}setDensity(t){this.createdDensity=t,this.nowDrawingDensity=t}setDrawingDensity(t){this.nowDrawingDensity=t}setPosition(t){this.state.position=t}setAngle(t){this.state.angle=t}setArea(t){this.state.area=t}setHardDrawingAngle(t){this.state.hardDrawingAngle=t}setHardAngle(t){this.state.hardAngle=t,this.state.hardDrawingAngle=t}setOrientation(t){this.orientation=t}getDrawingDensity(){return this.nowDrawingDensity}getDensity(){return this.createdDensity}getHardAngle(){return this.state.hardAngle}}class i extends e{constructor(t,e,i){super(t,i),this.image=null,this.isLoad=!1,this.loadingAngle=0,this.image=new Image,this.image.src=e}draw(t){const e=this.render.getContext(),i=this.render.convertToGlobal(this.state.position),s=this.render.getRect().pageWidth,n=this.render.getRect().height;e.save(),e.translate(i.x,i.y),e.beginPath();for(let t of this.state.area)null!==t&&(t=this.render.convertToGlobal(t),e.lineTo(t.x-i.x,t.y-i.y));e.rotate(this.state.angle),e.clip(),this.isLoad?e.drawImage(this.image,0,0,s,n):this.drawLoader(e,{x:0,y:0},s,n),e.restore()}simpleDraw(t){const e=this.render.getRect(),i=this.render.getContext(),s=e.pageWidth,n=e.height,h=1===t?e.left+e.pageWidth:e.left,r=e.top;this.isLoad?i.drawImage(this.image,h,r,s,n):this.drawLoader(i,{x:h,y:r},s,n)}drawLoader(t,e,i,s){t.beginPath(),t.strokeStyle="rgb(200, 200, 200)",t.fillStyle="rgb(255, 255, 255)",t.lineWidth=1,t.rect(e.x+1,e.y+1,i-1,s-1),t.stroke(),t.fill();const n={x:e.x+i/2,y:e.y+s/2};t.beginPath(),t.lineWidth=10,t.arc(n.x,n.y,20,this.loadingAngle,3*Math.PI/2+this.loadingAngle),t.stroke(),t.closePath(),this.loadingAngle+=.07,this.loadingAngle>=2*Math.PI&&(this.loadingAngle=0)}load(){this.isLoad||(this.image.onload=()=>{this.isLoad=!0})}newTemporaryCopy(){return this}getTemporaryCopy(){return this}hideTemporaryCopy(){}}class s{constructor(t,e){this.pages=[],this.currentPageIndex=0,this.currentSpreadIndex=0,this.landscapeSpread=[],this.portraitSpread=[],this.render=e,this.app=t,this.currentPageIndex=0,this.isShowCover=this.app.getSettings().showCover}destroy(){this.pages=[]}createSpread(){this.landscapeSpread=[],this.portraitSpread=[];for(let t=0;t<this.pages.length;t++)this.portraitSpread.push([t]);let t=0;this.isShowCover&&(this.pages[0].setDensity("hard"),this.landscapeSpread.push([t]),t++);for(let e=t;e<this.pages.length;e+=2)e<this.pages.length-1?this.landscapeSpread.push([e,e+1]):(this.landscapeSpread.push([e]),this.pages[e].setDensity("hard"))}getSpread(){return"landscape"===this.render.getOrientation()?this.landscapeSpread:this.portraitSpread}getSpreadIndexByPage(t){const e=this.getSpread();for(let i=0;i<e.length;i++)if(t===e[i][0]||t===e[i][1])return i;return null}getPageCount(){return this.pages.length}getPages(){return this.pages}getPage(t){if(t>=0&&t<this.pages.length)return this.pages[t];throw new Error("Invalid page number")}nextBy(t){const e=this.pages.indexOf(t);return e<this.pages.length-1?this.pages[e+1]:null}prevBy(t){const e=this.pages.indexOf(t);return e>0?this.pages[e-1]:null}getFlippingPage(t){const e=this.currentSpreadIndex;if("portrait"===this.render.getOrientation())return 0===t?this.pages[e].newTemporaryCopy():this.pages[e-1];{const i=0===t?this.getSpread()[e+1]:this.getSpread()[e-1];return 1===i.length||0===t?this.pages[i[0]]:this.pages[i[1]]}}getBottomPage(t){const e=this.currentSpreadIndex;if("portrait"===this.render.getOrientation())return 0===t?this.pages[e+1]:this.pages[e-1];{const i=0===t?this.getSpread()[e+1]:this.getSpread()[e-1];return 1===i.length?this.pages[i[0]]:0===t?this.pages[i[1]]:this.pages[i[0]]}}showNext(){this.currentSpreadIndex<this.getSpread().length&&(this.currentSpreadIndex++,this.showSpread())}showPrev(){this.currentSpreadIndex>0&&(this.currentSpreadIndex--,this.showSpread())}getCurrentPageIndex(){return this.currentPageIndex}show(t=null){if(null===t&&(t=this.currentPageIndex),t<0||t>=this.pages.length)return;const e=this.getSpreadIndexByPage(t);null!==e&&(this.currentSpreadIndex=e,this.showSpread())}getCurrentSpreadIndex(){return this.currentSpreadIndex}setCurrentSpreadIndex(t){if(!(t>=0&&t<this.getSpread().length))throw new Error("Invalid page");this.currentSpreadIndex=t}showSpread(){const t=this.getSpread()[this.currentSpreadIndex];2===t.length?(this.render.setLeftPage(this.pages[t[0]]),this.render.setRightPage(this.pages[t[1]])):"landscape"===this.render.getOrientation()&&t[0]===this.pages.length-1?(this.render.setLeftPage(this.pages[t[0]]),this.render.setRightPage(null)):(this.render.setLeftPage(null),this.render.setRightPage(this.pages[t[0]])),this.currentPageIndex=t[0],this.app.updatePageIndex(this.currentPageIndex)}}class n extends s{constructor(t,e,i){super(t,e),this.imagesHref=i}load(){for(const t of this.imagesHref){const e=new i(this.render,t,"soft");e.load(),this.pages.push(e)}this.createSpread()}}class h{static GetDistanceBetweenTwoPoint(t,e){return null===t||null===e?1/0:Math.sqrt(Math.pow(e.x-t.x,2)+Math.pow(e.y-t.y,2))}static GetSegmentLength(t){return h.GetDistanceBetweenTwoPoint(t[0],t[1])}static GetAngleBetweenTwoLine(t,e){const i=t[0].y-t[1].y,s=e[0].y-e[1].y,n=t[1].x-t[0].x,h=e[1].x-e[0].x;return Math.acos((i*s+n*h)/(Math.sqrt(i*i+n*n)*Math.sqrt(s*s+h*h)))}static PointInRect(t,e){return null===e?null:e.x>=t.left&&e.x<=t.width+t.left&&e.y>=t.top&&e.y<=t.top+t.height?e:null}static GetRotatedPoint(t,e,i){return{x:t.x*Math.cos(i)+t.y*Math.sin(i)+e.x,y:t.y*Math.cos(i)-t.x*Math.sin(i)+e.y}}static LimitPointToCircle(t,e,i){if(h.GetDistanceBetweenTwoPoint(t,i)<=e)return i;const s=t.x,n=t.y,r=i.x,o=i.y;let a=Math.sqrt(Math.pow(e,2)*Math.pow(s-r,2)/(Math.pow(s-r,2)+Math.pow(n-o,2)))+s;i.x<0&&(a*=-1);let g=(a-s)*(n-o)/(s-r)+n;return s-r+n===0&&(g=e),{x:a,y:g}}static GetIntersectBetweenTwoSegment(t,e,i){return h.PointInRect(t,h.GetIntersectBeetwenTwoLine(e,i))}static GetIntersectBeetwenTwoLine(t,e){const i=t[0].y-t[1].y,s=e[0].y-e[1].y,n=t[1].x-t[0].x,h=e[1].x-e[0].x,r=t[0].x*t[1].y-t[1].x*t[0].y,o=e[0].x*e[1].y-e[1].x*e[0].y,a=i*o-s*r,g=n*o-h*r,l=-(r*h-o*n)/(i*h-s*n),d=-(i*o-s*r)/(i*h-s*n);if(isFinite(l)&&isFinite(d))return{x:l,y:d};if(Math.abs(a-g)<.1)throw new Error("Segment included");return null}static GetCordsFromTwoPoint(t,e){const i=Math.abs(t.x-e.x),s=Math.abs(t.y-e.y),n=Math.max(i,s),h=[t];function r(t,e,i,s,n){return e>t?t+n*(i/s):e<t?t-n*(i/s):t}for(let o=1;o<=n;o+=1)h.push({x:r(t.x,e.x,i,n,o),y:r(t.y,e.y,s,n,o)});return h}}class r extends e{constructor(t,e,i){super(t,i),this.copiedElement=null,this.temporaryCopy=null,this.isLoad=!1,this.element=e,this.element.classList.add("stf__item"),this.element.classList.add("--"+i)}newTemporaryCopy(){return"hard"===this.nowDrawingDensity?this:(null===this.temporaryCopy&&(this.copiedElement=this.element.cloneNode(!0),this.element.parentElement.appendChild(this.copiedElement),this.temporaryCopy=new r(this.render,this.copiedElement,this.nowDrawingDensity)),this.getTemporaryCopy())}getTemporaryCopy(){return this.temporaryCopy}hideTemporaryCopy(){null!==this.temporaryCopy&&(this.copiedElement.remove(),this.copiedElement=null,this.temporaryCopy=null)}draw(t){const e=t||this.nowDrawingDensity,i=this.render.convertToGlobal(this.state.position),s=this.render.getRect().pageWidth,n=this.render.getRect().height;this.element.classList.remove("--simple");const h=`\n            display: block;\n            z-index: ${this.element.style.zIndex};\n            left: 0;\n            top: 0;\n            width: ${s}px;\n            height: ${n}px;\n        `;"hard"===e?this.drawHard(h):this.drawSoft(i,h)}drawHard(t=""){const e=this.render.getRect().left+this.render.getRect().width/2,i=this.state.hardDrawingAngle,s=t+"\n                backface-visibility: hidden;\n                -webkit-backface-visibility: hidden;\n                clip-path: none;\n                -webkit-clip-path: none;\n            "+(0===this.orientation?`transform-origin: ${this.render.getRect().pageWidth}px 0; \n                   transform: translate3d(0, 0, 0) rotateY(${i}deg);`:`transform-origin: 0 0; \n                   transform: translate3d(${e}px, 0, 0) rotateY(${i}deg);`);this.element.style.cssText=s}drawSoft(t,e=""){let i="polygon( ";for(const t of this.state.area)if(null!==t){let e=1===this.render.getDirection()?{x:-t.x+this.state.position.x,y:t.y-this.state.position.y}:{x:t.x-this.state.position.x,y:t.y-this.state.position.y};e=h.GetRotatedPoint(e,{x:0,y:0},this.state.angle),i+=e.x+"px "+e.y+"px, "}i=i.slice(0,-2),i+=")";const s=e+`transform-origin: 0 0; clip-path: ${i}; -webkit-clip-path: ${i};`+(this.render.isSafari()&&0===this.state.angle?`transform: translate(${t.x}px, ${t.y}px);`:`transform: translate3d(${t.x}px, ${t.y}px, 0) rotate(${this.state.angle}rad);`);this.element.style.cssText=s}simpleDraw(t){const e=this.render.getRect(),i=e.pageWidth,s=e.height,n=1===t?e.left+e.pageWidth:e.left,h=e.top;this.element.classList.add("--simple"),this.element.style.cssText=`\n            position: absolute; \n            display: block; \n            height: ${s}px; \n            left: ${n}px; \n            top: ${h}px; \n            width: ${i}px; \n            z-index: ${this.render.getSettings().startZIndex+1};`}getElement(){return this.element}load(){this.isLoad=!0}setOrientation(t){super.setOrientation(t),this.element.classList.remove("--left","--right"),this.element.classList.add(1===t?"--right":"--left")}setDrawingDensity(t){this.element.classList.remove("--soft","--hard"),this.element.classList.add("--"+t),super.setDrawingDensity(t)}}class o extends s{constructor(t,e,i,s){super(t,e),this.element=i,this.pagesElement=s}load(){for(const t of this.pagesElement){const e=new r(this.render,t,"hard"===t.dataset.density?"hard":"soft");e.load(),this.pages.push(e)}this.createSpread()}}class a{constructor(t,e,i,s){this.direction=t,this.corner=e,this.topIntersectPoint=null,this.sideIntersectPoint=null,this.bottomIntersectPoint=null,this.pageWidth=parseInt(i,10),this.pageHeight=parseInt(s,10)}calc(t){try{return this.position=this.calcAngleAndPosition(t),this.calculateIntersectPoint(this.position),!0}catch(t){return!1}}getFlippingClipArea(){const t=[];let e=!1;return t.push(this.rect.topLeft),t.push(this.topIntersectPoint),null===this.sideIntersectPoint?e=!0:(t.push(this.sideIntersectPoint),null===this.bottomIntersectPoint&&(e=!1)),t.push(this.bottomIntersectPoint),(e||"bottom"===this.corner)&&t.push(this.rect.bottomLeft),t}getBottomClipArea(){const t=[];return t.push(this.topIntersectPoint),"top"===this.corner?t.push({x:this.pageWidth,y:0}):(null!==this.topIntersectPoint&&t.push({x:this.pageWidth,y:0}),t.push({x:this.pageWidth,y:this.pageHeight})),null!==this.sideIntersectPoint?h.GetDistanceBetweenTwoPoint(this.sideIntersectPoint,this.topIntersectPoint)>=10&&t.push(this.sideIntersectPoint):"top"===this.corner&&t.push({x:this.pageWidth,y:this.pageHeight}),t.push(this.bottomIntersectPoint),t.push(this.topIntersectPoint),t}getAngle(){return 0===this.direction?-this.angle:this.angle}getRect(){return this.rect}getPosition(){return this.position}getActiveCorner(){return 0===this.direction?this.rect.topLeft:this.rect.topRight}getDirection(){return this.direction}getFlippingProgress(){return Math.abs((this.position.x-this.pageWidth)/(2*this.pageWidth)*100)}getCorner(){return this.corner}getBottomPagePosition(){return 1===this.direction?{x:this.pageWidth,y:0}:{x:0,y:0}}getShadowStartPoint(){return"top"===this.corner?this.topIntersectPoint:null!==this.sideIntersectPoint?this.sideIntersectPoint:this.topIntersectPoint}getShadowAngle(){const t=h.GetAngleBetweenTwoLine(this.getSegmentToShadowLine(),[{x:0,y:0},{x:this.pageWidth,y:0}]);return 0===this.direction?t:Math.PI-t}calcAngleAndPosition(t){let e=t;if(this.updateAngleAndGeometry(e),e="top"===this.corner?this.checkPositionAtCenterLine(e,{x:0,y:0},{x:0,y:this.pageHeight}):this.checkPositionAtCenterLine(e,{x:0,y:this.pageHeight},{x:0,y:0}),Math.abs(e.x-this.pageWidth)<1&&Math.abs(e.y)<1)throw new Error("Point is too small");return e}updateAngleAndGeometry(t){this.angle=this.calculateAngle(t),this.rect=this.getPageRect(t)}calculateAngle(t){const e=this.pageWidth-t.x+1,i="bottom"===this.corner?this.pageHeight-t.y:t.y;let s=2*Math.acos(e/Math.sqrt(i*i+e*e));i<0&&(s=-s);const n=Math.PI-s;if(!isFinite(s)||n>=0&&n<.003)throw new Error("The G point is too small");return"bottom"===this.corner&&(s=-s),s}getPageRect(t){return"top"===this.corner?this.getRectFromBasePoint([{x:0,y:0},{x:this.pageWidth,y:0},{x:0,y:this.pageHeight},{x:this.pageWidth,y:this.pageHeight}],t):this.getRectFromBasePoint([{x:0,y:-this.pageHeight},{x:this.pageWidth,y:-this.pageHeight},{x:0,y:0},{x:this.pageWidth,y:0}],t)}getRectFromBasePoint(t,e){return{topLeft:this.getRotatedPoint(t[0],e),topRight:this.getRotatedPoint(t[1],e),bottomLeft:this.getRotatedPoint(t[2],e),bottomRight:this.getRotatedPoint(t[3],e)}}getRotatedPoint(t,e){return{x:t.x*Math.cos(this.angle)+t.y*Math.sin(this.angle)+e.x,y:t.y*Math.cos(this.angle)-t.x*Math.sin(this.angle)+e.y}}calculateIntersectPoint(t){const e={left:-1,top:-1,width:this.pageWidth+2,height:this.pageHeight+2};"top"===this.corner?(this.topIntersectPoint=h.GetIntersectBetweenTwoSegment(e,[t,this.rect.topRight],[{x:0,y:0},{x:this.pageWidth,y:0}]),this.sideIntersectPoint=h.GetIntersectBetweenTwoSegment(e,[t,this.rect.bottomLeft],[{x:this.pageWidth,y:0},{x:this.pageWidth,y:this.pageHeight}]),this.bottomIntersectPoint=h.GetIntersectBetweenTwoSegment(e,[this.rect.bottomLeft,this.rect.bottomRight],[{x:0,y:this.pageHeight},{x:this.pageWidth,y:this.pageHeight}])):(this.topIntersectPoint=h.GetIntersectBetweenTwoSegment(e,[this.rect.topLeft,this.rect.topRight],[{x:0,y:0},{x:this.pageWidth,y:0}]),this.sideIntersectPoint=h.GetIntersectBetweenTwoSegment(e,[t,this.rect.topLeft],[{x:this.pageWidth,y:0},{x:this.pageWidth,y:this.pageHeight}]),this.bottomIntersectPoint=h.GetIntersectBetweenTwoSegment(e,[this.rect.bottomLeft,this.rect.bottomRight],[{x:0,y:this.pageHeight},{x:this.pageWidth,y:this.pageHeight}]))}checkPositionAtCenterLine(t,e,i){let s=t;const n=h.LimitPointToCircle(e,this.pageWidth,s);s!==n&&(s=n,this.updateAngleAndGeometry(s));const r=Math.sqrt(Math.pow(this.pageWidth,2)+Math.pow(this.pageHeight,2));let o=this.rect.bottomRight,a=this.rect.topLeft;if("bottom"===this.corner&&(o=this.rect.topRight,a=this.rect.bottomLeft),o.x<=0){const t=h.LimitPointToCircle(i,r,a);t!==s&&(s=t,this.updateAngleAndGeometry(s))}return s}getSegmentToShadowLine(){const t=this.getShadowStartPoint();return[t,t!==this.sideIntersectPoint&&null!==this.sideIntersectPoint?this.sideIntersectPoint:this.bottomIntersectPoint]}}class g{constructor(t,e){this.flippingPage=null,this.bottomPage=null,this.calc=null,this.state="read",this.render=t,this.app=e}fold(t){this.setState("user_fold"),null===this.calc&&this.start(t),this.do(this.render.convertToPage(t))}flip(t){if(this.app.getSettings().disableFlipByClick&&!this.isPointOnCorners(t))return;if(null!==this.calc&&this.render.finishAnimation(),!this.start(t))return;const e=this.getBoundsRect();this.setState("flipping");const i=e.height/10,s="bottom"===this.calc.getCorner()?e.height-i:i,n="bottom"===this.calc.getCorner()?e.height:0;this.calc.calc({x:e.pageWidth-i,y:s}),this.animateFlippingTo({x:e.pageWidth-i,y:s},{x:-e.pageWidth,y:n},!0)}start(t){this.reset();const e=this.render.convertToBook(t),i=this.getBoundsRect(),s=this.getDirectionByPoint(e),n=e.y>=i.height/2?"bottom":"top";if(!this.checkDirection(s))return!1;try{if(this.flippingPage=this.app.getPageCollection().getFlippingPage(s),this.bottomPage=this.app.getPageCollection().getBottomPage(s),"landscape"===this.render.getOrientation())if(1===s){const t=this.app.getPageCollection().nextBy(this.flippingPage);null!==t&&this.flippingPage.getDensity()!==t.getDensity()&&(this.flippingPage.setDrawingDensity("hard"),t.setDrawingDensity("hard"))}else{const t=this.app.getPageCollection().prevBy(this.flippingPage);null!==t&&this.flippingPage.getDensity()!==t.getDensity()&&(this.flippingPage.setDrawingDensity("hard"),t.setDrawingDensity("hard"))}return this.render.setDirection(s),this.calc=new a(s,n,i.pageWidth.toString(10),i.height.toString(10)),!0}catch(t){return!1}}do(t){if(null!==this.calc&&this.calc.calc(t)){const t=this.calc.getFlippingProgress();this.bottomPage.setArea(this.calc.getBottomClipArea()),this.bottomPage.setPosition(this.calc.getBottomPagePosition()),this.bottomPage.setAngle(0),this.bottomPage.setHardAngle(0),this.flippingPage.setArea(this.calc.getFlippingClipArea()),this.flippingPage.setPosition(this.calc.getActiveCorner()),this.flippingPage.setAngle(this.calc.getAngle()),0===this.calc.getDirection()?this.flippingPage.setHardAngle(90*(200-2*t)/100):this.flippingPage.setHardAngle(-90*(200-2*t)/100),this.render.setPageRect(this.calc.getRect()),this.render.setBottomPage(this.bottomPage),this.render.setFlippingPage(this.flippingPage),this.render.setShadowData(this.calc.getShadowStartPoint(),this.calc.getShadowAngle(),t,this.calc.getDirection())}}flipToPage(t,e){const i=this.app.getPageCollection().getCurrentSpreadIndex(),s=this.app.getPageCollection().getSpreadIndexByPage(t);try{s>i&&(this.app.getPageCollection().setCurrentSpreadIndex(s-1),this.flipNext(e)),s<i&&(this.app.getPageCollection().setCurrentSpreadIndex(s+1),this.flipPrev(e))}catch(t){}}flipNext(t){this.flip({x:this.render.getRect().left+2*this.render.getRect().pageWidth-10,y:"top"===t?1:this.render.getRect().height-2})}flipPrev(t){this.flip({x:10,y:"top"===t?1:this.render.getRect().height-2})}stopMove(){if(null===this.calc)return;const t=this.calc.getPosition(),e=this.getBoundsRect(),i="bottom"===this.calc.getCorner()?e.height:0;t.x<=0?this.animateFlippingTo(t,{x:-e.pageWidth,y:i},!0):this.animateFlippingTo(t,{x:e.pageWidth,y:i},!1)}showCorner(t){if(!this.checkState("read","fold_corner"))return;const e=this.getBoundsRect(),i=e.pageWidth;if(this.isPointOnCorners(t))if(null===this.calc){if(!this.start(t))return;this.setState("fold_corner"),this.calc.calc({x:i-1,y:1});const s=50,n="bottom"===this.calc.getCorner()?e.height-1:1,h="bottom"===this.calc.getCorner()?e.height-s:s;this.animateFlippingTo({x:i-1,y:n},{x:i-s,y:h},!1,!1)}else this.do(this.render.convertToPage(t));else this.setState("read"),this.render.finishAnimation(),this.stopMove()}animateFlippingTo(t,e,i,s=!0){const n=h.GetCordsFromTwoPoint(t,e),r=[];for(const t of n)r.push(()=>this.do(t));const o=this.getAnimationDuration(n.length);this.render.startAnimation(r,o,()=>{this.calc&&(i&&(1===this.calc.getDirection()?this.app.turnToPrevPage():this.app.turnToNextPage()),s&&(this.render.setBottomPage(null),this.render.setFlippingPage(null),this.render.clearShadow(),this.setState("read"),this.reset()))})}getCalculation(){return this.calc}getState(){return this.state}setState(t){this.state!==t&&(this.app.updateState(t),this.state=t)}getDirectionByPoint(t){const e=this.getBoundsRect();if("portrait"===this.render.getOrientation()){if(t.x-e.pageWidth<=e.width/5)return 1}else if(t.x<e.width/2)return 1;return 0}getAnimationDuration(t){const e=this.app.getSettings().flippingTime;return t>=1e3?e:t/1e3*e}checkDirection(t){return 0===t?this.app.getCurrentPageIndex()<this.app.getPageCount()-1:this.app.getCurrentPageIndex()>=1}reset(){this.calc=null,this.flippingPage=null,this.bottomPage=null}getBoundsRect(){return this.render.getRect()}checkState(...t){for(const e of t)if(this.state===e)return!0;return!1}isPointOnCorners(t){const e=this.getBoundsRect(),i=e.pageWidth,s=Math.sqrt(Math.pow(i,2)+Math.pow(e.height,2))/5,n=this.render.convertToBook(t);return n.x>0&&n.y>0&&n.x<e.width&&n.y<e.height&&(n.x<s||n.x>e.width-s)&&(n.y<s||n.y>e.height-s)}}class l{constructor(t,e){this.leftPage=null,this.rightPage=null,this.flippingPage=null,this.bottomPage=null,this.direction=null,this.orientation=null,this.shadow=null,this.animation=null,this.pageRect=null,this.boundsRect=null,this.timer=0,this.safari=!1,this.setting=e,this.app=t;const i=new RegExp("Version\\/[\\d\\.]+.*Safari/");this.safari=null!==i.exec(window.navigator.userAgent)}render(t){if(null!==this.animation){const e=Math.round((t-this.animation.startedAt)/this.animation.durationFrame);e<this.animation.frames.length?this.animation.frames[e]():(this.animation.onAnimateEnd(),this.animation=null)}this.timer=t,this.drawFrame()}start(){this.update();const t=e=>{this.render(e),requestAnimationFrame(t)};requestAnimationFrame(t)}startAnimation(t,e,i){this.finishAnimation(),this.animation={frames:t,duration:e,durationFrame:e/t.length,onAnimateEnd:i,startedAt:this.timer}}finishAnimation(){null!==this.animation&&(this.animation.frames[this.animation.frames.length-1](),null!==this.animation.onAnimateEnd&&this.animation.onAnimateEnd()),this.animation=null}update(){this.boundsRect=null;const t=this.calculateBoundsRect();this.orientation!==t&&(this.orientation=t,this.app.updateOrientation(t))}calculateBoundsRect(){let t="landscape";const e=this.getBlockWidth(),i=e/2,s=this.getBlockHeight()/2,n=this.setting.width/this.setting.height;let h=this.setting.width,r=this.setting.height,o=i-h;return"stretch"===this.setting.size?(e<2*this.setting.minWidth&&this.app.getSettings().usePortrait&&(t="portrait"),h="portrait"===t?this.getBlockWidth():this.getBlockWidth()/2,h>this.setting.maxWidth&&(h=this.setting.maxWidth),r=h/n,r>this.getBlockHeight()&&(r=this.getBlockHeight(),h=r*n),o="portrait"===t?i-h/2-h:i-h):e<2*h&&this.app.getSettings().usePortrait&&(t="portrait",o=i-h/2-h),this.boundsRect={left:o,top:s-r/2,width:2*h,height:r,pageWidth:h},t}setShadowData(t,e,i,s){if(!this.app.getSettings().drawShadow)return;const n=100*this.getSettings().maxShadowOpacity;this.shadow={pos:t,angle:e,width:3*this.getRect().pageWidth/4*i/100,opacity:(100-i)*n/100/100,direction:s,progress:2*i}}clearShadow(){this.shadow=null}getBlockWidth(){return this.app.getUI().getDistElement().offsetWidth}getBlockHeight(){return this.app.getUI().getDistElement().offsetHeight}getDirection(){return this.direction}getRect(){return null===this.boundsRect&&this.calculateBoundsRect(),this.boundsRect}getSettings(){return this.app.getSettings()}getOrientation(){return this.orientation}setPageRect(t){this.pageRect=t}setDirection(t){this.direction=t}setRightPage(t){null!==t&&t.setOrientation(1),this.rightPage=t}setLeftPage(t){null!==t&&t.setOrientation(0),this.leftPage=t}setBottomPage(t){null!==t&&t.setOrientation(1===this.direction?0:1),this.bottomPage=t}setFlippingPage(t){null!==t&&t.setOrientation(0===this.direction&&"portrait"!==this.orientation?0:1),this.flippingPage=t}convertToBook(t){const e=this.getRect();return{x:t.x-e.left,y:t.y-e.top}}isSafari(){return this.safari}convertToPage(t,e){e||(e=this.direction);const i=this.getRect();return{x:0===e?t.x-i.left-i.width/2:i.width/2-t.x+i.left,y:t.y-i.top}}convertToGlobal(t,e){if(e||(e=this.direction),null==t)return null;const i=this.getRect();return{x:0===e?t.x+i.left+i.width/2:i.width/2-t.x+i.left,y:t.y+i.top}}convertRectToGlobal(t,e){return e||(e=this.direction),{topLeft:this.convertToGlobal(t.topLeft,e),topRight:this.convertToGlobal(t.topRight,e),bottomLeft:this.convertToGlobal(t.bottomLeft,e),bottomRight:this.convertToGlobal(t.bottomRight,e)}}}class d extends l{constructor(t,e,i){super(t,e),this.canvas=i,this.ctx=i.getContext("2d")}getContext(){return this.ctx}reload(){}drawFrame(){this.clear(),"portrait"!==this.orientation&&null!=this.leftPage&&this.leftPage.simpleDraw(0),null!=this.rightPage&&this.rightPage.simpleDraw(1),null!=this.bottomPage&&this.bottomPage.draw(),this.drawBookShadow(),null!=this.flippingPage&&this.flippingPage.draw(),null!=this.shadow&&(this.drawOuterShadow(),this.drawInnerShadow());const t=this.getRect();"portrait"===this.orientation&&(this.ctx.beginPath(),this.ctx.rect(t.left+t.pageWidth,t.top,t.width,t.height),this.ctx.clip())}drawBookShadow(){const t=this.getRect();this.ctx.save(),this.ctx.beginPath();const e=t.width/20;this.ctx.rect(t.left,t.top,t.width,t.height);const i={x:t.left+t.width/2-e/2,y:0};this.ctx.translate(i.x,i.y);const s=this.ctx.createLinearGradient(0,0,e,0);s.addColorStop(0,"rgba(0, 0, 0, 0)"),s.addColorStop(.4,"rgba(0, 0, 0, 0.2)"),s.addColorStop(.49,"rgba(0, 0, 0, 0.1)"),s.addColorStop(.5,"rgba(0, 0, 0, 0.5)"),s.addColorStop(.51,"rgba(0, 0, 0, 0.4)"),s.addColorStop(1,"rgba(0, 0, 0, 0)"),this.ctx.clip(),this.ctx.fillStyle=s,this.ctx.fillRect(0,0,e,2*t.height),this.ctx.restore()}drawOuterShadow(){const t=this.getRect();this.ctx.save(),this.ctx.beginPath(),this.ctx.rect(t.left,t.top,t.width,t.height);const e=this.convertToGlobal({x:this.shadow.pos.x,y:this.shadow.pos.y});this.ctx.translate(e.x,e.y),this.ctx.rotate(Math.PI+this.shadow.angle+Math.PI/2);const i=this.ctx.createLinearGradient(0,0,this.shadow.width,0);0===this.shadow.direction?(this.ctx.translate(0,-100),i.addColorStop(0,"rgba(0, 0, 0, "+this.shadow.opacity+")"),i.addColorStop(1,"rgba(0, 0, 0, 0)")):(this.ctx.translate(-this.shadow.width,-100),i.addColorStop(0,"rgba(0, 0, 0, 0)"),i.addColorStop(1,"rgba(0, 0, 0, "+this.shadow.opacity+")")),this.ctx.clip(),this.ctx.fillStyle=i,this.ctx.fillRect(0,0,this.shadow.width,2*t.height),this.ctx.restore()}drawInnerShadow(){const t=this.getRect();this.ctx.save(),this.ctx.beginPath();const e=this.convertToGlobal({x:this.shadow.pos.x,y:this.shadow.pos.y}),i=this.convertRectToGlobal(this.pageRect);this.ctx.moveTo(i.topLeft.x,i.topLeft.y),this.ctx.lineTo(i.topRight.x,i.topRight.y),this.ctx.lineTo(i.bottomRight.x,i.bottomRight.y),this.ctx.lineTo(i.bottomLeft.x,i.bottomLeft.y),this.ctx.translate(e.x,e.y),this.ctx.rotate(Math.PI+this.shadow.angle+Math.PI/2);const s=3*this.shadow.width/4,n=this.ctx.createLinearGradient(0,0,s,0);0===this.shadow.direction?(this.ctx.translate(-s,-100),n.addColorStop(1,"rgba(0, 0, 0, "+this.shadow.opacity+")"),n.addColorStop(.9,"rgba(0, 0, 0, 0.05)"),n.addColorStop(.7,"rgba(0, 0, 0, "+this.shadow.opacity+")"),n.addColorStop(0,"rgba(0, 0, 0, 0)")):(this.ctx.translate(0,-100),n.addColorStop(0,"rgba(0, 0, 0, "+this.shadow.opacity+")"),n.addColorStop(.1,"rgba(0, 0, 0, 0.05)"),n.addColorStop(.3,"rgba(0, 0, 0, "+this.shadow.opacity+")"),n.addColorStop(1,"rgba(0, 0, 0, 0)")),this.ctx.clip(),this.ctx.fillStyle=n,this.ctx.fillRect(0,0,s,2*t.height),this.ctx.restore()}clear(){this.ctx.fillStyle="white",this.ctx.fillRect(0,0,this.canvas.width,this.canvas.height)}}class p{constructor(t,e,i){this.touchPoint=null,this.swipeTimeout=250,this.onResize=()=>{this.update()},this.onMouseDown=t=>{if(this.checkTarget(t.target)){const e=this.getMousePos(t.clientX,t.clientY);this.app.startUserTouch(e),t.preventDefault()}},this.onTouchStart=t=>{if(this.checkTarget(t.target)&&t.changedTouches.length>0){const e=t.changedTouches[0],i=this.getMousePos(e.clientX,e.clientY);this.touchPoint={point:i,time:Date.now()},setTimeout(()=>{null!==this.touchPoint&&this.app.startUserTouch(i)},this.swipeTimeout),this.app.getSettings().mobileScrollSupport||t.preventDefault()}},this.onMouseUp=t=>{const e=this.getMousePos(t.clientX,t.clientY);this.app.userStop(e)},this.onMouseMove=t=>{const e=this.getMousePos(t.clientX,t.clientY);this.app.userMove(e,!1)},this.onTouchMove=t=>{if(t.changedTouches.length>0){const e=t.changedTouches[0],i=this.getMousePos(e.clientX,e.clientY);this.app.getSettings().mobileScrollSupport?(null!==this.touchPoint&&(Math.abs(this.touchPoint.point.x-i.x)>10||"read"!==this.app.getState())&&t.cancelable&&this.app.userMove(i,!0),"read"!==this.app.getState()&&t.preventDefault()):this.app.userMove(i,!0)}},this.onTouchEnd=t=>{if(t.changedTouches.length>0){const e=t.changedTouches[0],i=this.getMousePos(e.clientX,e.clientY);let s=!1;if(null!==this.touchPoint){const t=i.x-this.touchPoint.point.x,e=Math.abs(i.y-this.touchPoint.point.y);Math.abs(t)>this.swipeDistance&&e<2*this.swipeDistance&&Date.now()-this.touchPoint.time<this.swipeTimeout&&(t>0?this.app.flipPrev(this.touchPoint.point.y<this.app.getRender().getRect().height/2?"top":"bottom"):this.app.flipNext(this.touchPoint.point.y<this.app.getRender().getRect().height/2?"top":"bottom"),s=!0),this.touchPoint=null}this.app.userStop(i,s)}},this.parentElement=t,t.classList.add("stf__parent"),t.insertAdjacentHTML("afterbegin",'<div class="stf__wrapper"></div>'),this.wrapper=t.querySelector(".stf__wrapper"),this.app=e;const s=this.app.getSettings().usePortrait?1:2;t.style.minWidth=i.minWidth*s+"px",t.style.minHeight=i.minHeight+"px","fixed"===i.size&&(t.style.minWidth=i.width*s+"px",t.style.minHeight=i.height+"px"),i.autoSize&&(t.style.width="100%",t.style.maxWidth=2*i.maxWidth+"px"),t.style.display="block",window.addEventListener("resize",this.onResize,!1),this.swipeDistance=i.swipeDistance}destroy(){this.app.getSettings().useMouseEvents&&this.removeHandlers(),this.distElement.remove(),this.wrapper.remove()}getDistElement(){return this.distElement}getWrapper(){return this.wrapper}setOrientationStyle(t){this.wrapper.classList.remove("--portrait","--landscape"),"portrait"===t?(this.app.getSettings().autoSize&&(this.wrapper.style.paddingBottom=this.app.getSettings().height/this.app.getSettings().width*100+"%"),this.wrapper.classList.add("--portrait")):(this.app.getSettings().autoSize&&(this.wrapper.style.paddingBottom=this.app.getSettings().height/(2*this.app.getSettings().width)*100+"%"),this.wrapper.classList.add("--landscape")),this.update()}removeHandlers(){window.removeEventListener("resize",this.onResize),this.distElement.removeEventListener("mousedown",this.onMouseDown),this.distElement.removeEventListener("touchstart",this.onTouchStart),window.removeEventListener("mousemove",this.onMouseMove),window.removeEventListener("touchmove",this.onTouchMove),window.removeEventListener("mouseup",this.onMouseUp),window.removeEventListener("touchend",this.onTouchEnd)}setHandlers(){window.addEventListener("resize",this.onResize,!1),this.app.getSettings().useMouseEvents&&(this.distElement.addEventListener("mousedown",this.onMouseDown),this.distElement.addEventListener("touchstart",this.onTouchStart),window.addEventListener("mousemove",this.onMouseMove),window.addEventListener("touchmove",this.onTouchMove,{passive:!this.app.getSettings().mobileScrollSupport}),window.addEventListener("mouseup",this.onMouseUp),window.addEventListener("touchend",this.onTouchEnd))}getMousePos(t,e){const i=this.distElement.getBoundingClientRect();return{x:t-i.left,y:e-i.top}}checkTarget(t){return!this.app.getSettings().clickEventForward||!["a","button"].includes(t.tagName.toLowerCase())}}class c extends p{constructor(t,e,i,s){super(t,e,i),this.wrapper.insertAdjacentHTML("afterbegin",'<div class="stf__block"></div>'),this.distElement=t.querySelector(".stf__block"),this.items=s;for(const t of s)this.distElement.appendChild(t);this.setHandlers()}clear(){for(const t of this.items)this.parentElement.appendChild(t)}updateItems(t){this.removeHandlers(),this.distElement.innerHTML="";for(const e of t)this.distElement.appendChild(e);this.items=t,this.setHandlers()}update(){this.app.getRender().update()}}class u extends p{constructor(t,e,i){super(t,e,i),this.wrapper.innerHTML='<canvas class="stf__canvas"></canvas>',this.canvas=t.querySelectorAll("canvas")[0],this.distElement=this.canvas,this.resizeCanvas(),this.setHandlers()}resizeCanvas(){const t=getComputedStyle(this.canvas),e=parseInt(t.getPropertyValue("width"),10),i=parseInt(t.getPropertyValue("height"),10);this.canvas.width=e,this.canvas.height=i}getCanvas(){return this.canvas}update(){this.resizeCanvas(),this.app.getRender().update()}}class w extends l{constructor(t,e,i){super(t,e),this.outerShadow=null,this.innerShadow=null,this.hardShadow=null,this.hardInnerShadow=null,this.element=i,this.createShadows()}createShadows(){this.element.insertAdjacentHTML("beforeend",'<div class="stf__outerShadow"></div>\n             <div class="stf__innerShadow"></div>\n             <div class="stf__hardShadow"></div>\n             <div class="stf__hardInnerShadow"></div>'),this.outerShadow=this.element.querySelector(".stf__outerShadow"),this.innerShadow=this.element.querySelector(".stf__innerShadow"),this.hardShadow=this.element.querySelector(".stf__hardShadow"),this.hardInnerShadow=this.element.querySelector(".stf__hardInnerShadow")}clearShadow(){super.clearShadow(),this.outerShadow.style.cssText="display: none",this.innerShadow.style.cssText="display: none",this.hardShadow.style.cssText="display: none",this.hardInnerShadow.style.cssText="display: none"}reload(){this.element.querySelector(".stf__outerShadow")||this.createShadows()}drawHardInnerShadow(){const t=this.getRect(),e=this.shadow.progress>100?200-this.shadow.progress:this.shadow.progress;let i=(100-e)*(2.5*t.pageWidth)/100+20;i>t.pageWidth&&(i=t.pageWidth);let s=`\n            display: block;\n            z-index: ${(this.getSettings().startZIndex+5).toString(10)};\n            width: ${i}px;\n            height: ${t.height}px;\n            background: linear-gradient(to right,\n                rgba(0, 0, 0, ${this.shadow.opacity*e/100}) 5%,\n                rgba(0, 0, 0, 0) 100%);\n            left: ${t.left+t.width/2}px;\n            transform-origin: 0 0;\n        `;s+=0===this.getDirection()&&this.shadow.progress>100||1===this.getDirection()&&this.shadow.progress<=100?"transform: translate3d(0, 0, 0);":"transform: translate3d(0, 0, 0) rotateY(180deg);",this.hardInnerShadow.style.cssText=s}drawHardOuterShadow(){const t=this.getRect();let e=(100-(this.shadow.progress>100?200-this.shadow.progress:this.shadow.progress))*(2.5*t.pageWidth)/100+20;e>t.pageWidth&&(e=t.pageWidth);let i=`\n            display: block;\n            z-index: ${(this.getSettings().startZIndex+4).toString(10)};\n            width: ${e}px;\n            height: ${t.height}px;\n            background: linear-gradient(to left, rgba(0, 0, 0, ${this.shadow.opacity}) 5%, rgba(0, 0, 0, 0) 100%);\n            left: ${t.left+t.width/2}px;\n            transform-origin: 0 0;\n        `;i+=0===this.getDirection()&&this.shadow.progress>100||1===this.getDirection()&&this.shadow.progress<=100?"transform: translate3d(0, 0, 0) rotateY(180deg);":"transform: translate3d(0, 0, 0);",this.hardShadow.style.cssText=i}drawInnerShadow(){const t=this.getRect(),e=3*this.shadow.width/4,i=0===this.getDirection()?e:0,s=0===this.getDirection()?"to left":"to right",n=this.convertToGlobal(this.shadow.pos),r=this.shadow.angle+3*Math.PI/2,o=[this.pageRect.topLeft,this.pageRect.topRight,this.pageRect.bottomRight,this.pageRect.bottomLeft];let a="polygon( ";for(const t of o){let e=1===this.getDirection()?{x:-t.x+this.shadow.pos.x,y:t.y-this.shadow.pos.y}:{x:t.x-this.shadow.pos.x,y:t.y-this.shadow.pos.y};e=h.GetRotatedPoint(e,{x:i,y:100},r),a+=e.x+"px "+e.y+"px, "}a=a.slice(0,-2),a+=")";const g=`\n            display: block;\n            z-index: ${(this.getSettings().startZIndex+10).toString(10)};\n            width: ${e}px;\n            height: ${2*t.height}px;\n            background: linear-gradient(${s},\n                rgba(0, 0, 0, ${this.shadow.opacity}) 5%,\n                rgba(0, 0, 0, 0.05) 15%,\n                rgba(0, 0, 0, ${this.shadow.opacity}) 35%,\n                rgba(0, 0, 0, 0) 100%);\n            transform-origin: ${i}px 100px;\n            transform: translate3d(${n.x-i}px, ${n.y-100}px, 0) rotate(${r}rad);\n            clip-path: ${a};\n            -webkit-clip-path: ${a};\n        `;this.innerShadow.style.cssText=g}drawOuterShadow(){const t=this.getRect(),e=this.convertToGlobal({x:this.shadow.pos.x,y:this.shadow.pos.y}),i=this.shadow.angle+3*Math.PI/2,s=1===this.getDirection()?this.shadow.width:0,n=0===this.getDirection()?"to right":"to left",r=[{x:0,y:0},{x:t.pageWidth,y:0},{x:t.pageWidth,y:t.height},{x:0,y:t.height}];let o="polygon( ";for(const t of r)if(null!==t){let e=1===this.getDirection()?{x:-t.x+this.shadow.pos.x,y:t.y-this.shadow.pos.y}:{x:t.x-this.shadow.pos.x,y:t.y-this.shadow.pos.y};e=h.GetRotatedPoint(e,{x:s,y:100},i),o+=e.x+"px "+e.y+"px, "}o=o.slice(0,-2),o+=")";const a=`\n            display: block;\n            z-index: ${(this.getSettings().startZIndex+10).toString(10)};\n            width: ${this.shadow.width}px;\n            height: ${2*t.height}px;\n            background: linear-gradient(${n}, rgba(0, 0, 0, ${this.shadow.opacity}), rgba(0, 0, 0, 0));\n            transform-origin: ${s}px 100px;\n            transform: translate3d(${e.x-s}px, ${e.y-100}px, 0) rotate(${i}rad);\n            clip-path: ${o};\n            -webkit-clip-path: ${o};\n        `;this.outerShadow.style.cssText=a}drawLeftPage(){"portrait"!==this.orientation&&null!==this.leftPage&&(1===this.direction&&null!==this.flippingPage&&"hard"===this.flippingPage.getDrawingDensity()?(this.leftPage.getElement().style.zIndex=(this.getSettings().startZIndex+5).toString(10),this.leftPage.setHardDrawingAngle(180+this.flippingPage.getHardAngle()),this.leftPage.draw(this.flippingPage.getDrawingDensity())):this.leftPage.simpleDraw(0))}drawRightPage(){null!==this.rightPage&&(0===this.direction&&null!==this.flippingPage&&"hard"===this.flippingPage.getDrawingDensity()?(this.rightPage.getElement().style.zIndex=(this.getSettings().startZIndex+5).toString(10),this.rightPage.setHardDrawingAngle(180+this.flippingPage.getHardAngle()),this.rightPage.draw(this.flippingPage.getDrawingDensity())):this.rightPage.simpleDraw(1))}drawBottomPage(){if(null===this.bottomPage)return;const t=null!=this.flippingPage?this.flippingPage.getDrawingDensity():null;"portrait"===this.orientation&&1===this.direction||(this.bottomPage.getElement().style.zIndex=(this.getSettings().startZIndex+3).toString(10),this.bottomPage.draw(t))}drawFrame(){this.clear(),this.drawLeftPage(),this.drawRightPage(),this.drawBottomPage(),null!=this.flippingPage&&(this.flippingPage.getElement().style.zIndex=(this.getSettings().startZIndex+5).toString(10),this.flippingPage.draw()),null!=this.shadow&&null!==this.flippingPage&&("soft"===this.flippingPage.getDrawingDensity()?(this.drawOuterShadow(),this.drawInnerShadow()):(this.drawHardOuterShadow(),this.drawHardInnerShadow()))}clear(){for(const t of this.app.getPageCollection().getPages())t!==this.leftPage&&t!==this.rightPage&&t!==this.flippingPage&&t!==this.bottomPage&&(t.getElement().style.cssText="display: none"),t.getTemporaryCopy()!==this.flippingPage&&t.hideTemporaryCopy()}update(){super.update(),null!==this.rightPage&&this.rightPage.setOrientation(1),null!==this.leftPage&&this.leftPage.setOrientation(0)}}class x{constructor(){this._default={startPage:0,size:"fixed",width:0,height:0,minWidth:0,maxWidth:0,minHeight:0,maxHeight:0,drawShadow:!0,flippingTime:1e3,usePortrait:!0,startZIndex:0,autoSize:!0,maxShadowOpacity:1,showCover:!1,mobileScrollSupport:!0,swipeDistance:30,clickEventForward:!0,useMouseEvents:!0,showPageCorners:!0,disableFlipByClick:!1}}getSettings(t){const e=this._default;if(Object.assign(e,t),"stretch"!==e.size&&"fixed"!==e.size)throw new Error('Invalid size type. Available only "fixed" and "stretch" value');if(e.width<=0||e.height<=0)throw new Error("Invalid width or height");if(e.flippingTime<=0)throw new Error("Invalid flipping time");return"stretch"===e.size?(e.minWidth<=0&&(e.minWidth=100),e.maxWidth<e.minWidth&&(e.maxWidth=2e3),e.minHeight<=0&&(e.minHeight=100),e.maxHeight<e.minHeight&&(e.maxHeight=2e3)):(e.minWidth=e.width,e.maxWidth=e.width,e.minHeight=e.height,e.maxHeight=e.height),e}}!function(t,e){void 0===e&&(e={});var i=e.insertAt;if(t&&"undefined"!=typeof document){var s=document.head||document.getElementsByTagName("head")[0],n=document.createElement("style");n.type="text/css","top"===i&&s.firstChild?s.insertBefore(n,s.firstChild):s.appendChild(n),n.styleSheet?n.styleSheet.cssText=t:n.appendChild(document.createTextNode(t))}}(".stf__parent {\n  position: relative;\n  display: block;\n  box-sizing: border-box;\n  transform: translateZ(0);\n\n  -ms-touch-action: pan-y;\n  touch-action: pan-y;\n}\n\n.sft__wrapper {\n  position: relative;\n  width: 100%;\n  box-sizing: border-box;\n}\n\n.stf__parent canvas {\n  position: absolute;\n  width: 100%;\n  height: 100%;\n  left: 0;\n  top: 0;\n}\n\n.stf__block {\n  position: absolute;\n  width: 100%;\n  height: 100%;\n  box-sizing: border-box;\n  perspective: 2000px;\n}\n\n.stf__item {\n  display: none;\n  position: absolute;\n  transform-style: preserve-3d;\n}\n\n.stf__outerShadow {\n  position: absolute;\n  left: 0;\n  top: 0;\n}\n\n.stf__innerShadow {\n  position: absolute;\n  left: 0;\n  top: 0;\n}\n\n.stf__hardShadow {\n  position: absolute;\n  left: 0;\n  top: 0;\n}\n\n.stf__hardInnerShadow {\n  position: absolute;\n  left: 0;\n  top: 0;\n}");t.PageFlip=class extends class{constructor(){this.events=new Map}on(t,e){return this.events.has(t)?this.events.get(t).push(e):this.events.set(t,[e]),this}off(t){this.events.delete(t)}trigger(t,e,i=null){if(this.events.has(t))for(const s of this.events.get(t))s({data:i,object:e})}}{constructor(t,e){super(),this.isUserTouch=!1,this.isUserMove=!1,this.setting=null,this.pages=null,this.setting=(new x).getSettings(e),this.block=t}destroy(){this.ui.destroy(),this.block.remove()}update(){this.render.update(),this.pages.show()}loadFromImages(t){this.ui=new u(this.block,this,this.setting);const e=this.ui.getCanvas();this.render=new d(this,this.setting,e),this.flipController=new g(this.render,this),this.pages=new n(this,this.render,t),this.pages.load(),this.render.start(),this.pages.show(this.setting.startPage),setTimeout(()=>{this.ui.update(),this.trigger("init",this,{page:this.setting.startPage,mode:this.render.getOrientation()})},1)}loadFromHTML(t){this.ui=new c(this.block,this,this.setting,t),this.render=new w(this,this.setting,this.ui.getDistElement()),this.flipController=new g(this.render,this),this.pages=new o(this,this.render,this.ui.getDistElement(),t),this.pages.load(),this.render.start(),this.pages.show(this.setting.startPage),setTimeout(()=>{this.ui.update(),this.trigger("init",this,{page:this.setting.startPage,mode:this.render.getOrientation()})},1)}updateFromImages(t){const e=this.pages.getCurrentPageIndex();this.pages.destroy(),this.pages=new n(this,this.render,t),this.pages.load(),this.pages.show(e),this.trigger("update",this,{page:e,mode:this.render.getOrientation()})}updateFromHtml(t){const e=this.pages.getCurrentPageIndex();this.pages.destroy(),this.pages=new o(this,this.render,this.ui.getDistElement(),t),this.pages.load(),this.ui.updateItems(t),this.render.reload(),this.pages.show(e),this.trigger("update",this,{page:e,mode:this.render.getOrientation()})}clear(){this.pages.destroy(),this.ui.clear()}turnToPrevPage(){this.pages.showPrev()}turnToNextPage(){this.pages.showNext()}turnToPage(t){this.pages.show(t)}flipNext(t="top"){this.flipController.flipNext(t)}flipPrev(t="top"){this.flipController.flipPrev(t)}flip(t,e="top"){this.flipController.flipToPage(t,e)}updateState(t){this.trigger("changeState",this,t)}updatePageIndex(t){this.trigger("flip",this,t)}updateOrientation(t){this.ui.setOrientationStyle(t),this.update(),this.trigger("changeOrientation",this,t)}getPageCount(){return this.pages.getPageCount()}getCurrentPageIndex(){return this.pages.getCurrentPageIndex()}getPage(t){return this.pages.getPage(t)}getRender(){return this.render}getFlipController(){return this.flipController}getOrientation(){return this.render.getOrientation()}getBoundsRect(){return this.render.getRect()}getSettings(){return this.setting}getUI(){return this.ui}getState(){return this.flipController.getState()}getPageCollection(){return this.pages}startUserTouch(t){this.mousePosition=t,this.isUserTouch=!0,this.isUserMove=!1}userMove(t,e){this.isUserTouch||e||!this.setting.showPageCorners?this.isUserTouch&&h.GetDistanceBetweenTwoPoint(this.mousePosition,t)>5&&(this.isUserMove=!0,this.flipController.fold(t)):this.flipController.showCorner(t)}userStop(t,e=!1){this.isUserTouch&&(this.isUserTouch=!1,e||(this.isUserMove?this.flipController.stopMove():this.flipController.flip(t)))}},Object.defineProperty(t,"__esModule",{value:!0})}));
+
+  </script>
+
+  <script>
+(function () {
+  'use strict';
+
+  var PageFlip = (window.St && window.St.PageFlip) ? window.St.PageFlip : window.PageFlip;
+
+  // ---------------------------------------------------------------------
+  // Embedded page manifest. build-static-flipbook.py replaces the `null`
+  // below with a JSON array of {src, w, h} objects (src = a data: URI for
+  // one pre-rendered page image) when it packages a specific PDF into a
+  // self-contained flipbook. Left null in this master template, in which
+  // case the file-picker/drag-drop path below is used instead (handy for
+  // testing the viewer itself against a rasterize-pdf.py output folder
+  // without running the packaging step).
+  // ---------------------------------------------------------------------
+  var EMBEDDED_MANIFEST = /*__PAGE_MANIFEST__*/ null;
+
+  // ---------------------------------------------------------------------
+  // DOM references
+  // ---------------------------------------------------------------------
+  var fileInput = document.getElementById('fileInput');
+  var btnLoad = document.getElementById('btnLoad');
+  var btnLoad2 = document.getElementById('btnLoad2');
+  var dropHint = document.getElementById('dropHint');
+  var toolbar = document.getElementById('toolbar');
+  var stage = document.getElementById('stage');
+  var viewportEl = document.getElementById('viewport');
+  var zoomLayer = document.getElementById('zoomLayer');
+  var flipbookEl = document.getElementById('flipbook');
+  var pageJumpInput = document.getElementById('pageJumpInput');
+  var pageTotalLabel = document.getElementById('pageTotalLabel');
+  var btnRestart = document.getElementById('btnRestart');
+  var navPrev = document.getElementById('navPrev');
+  var navNext = document.getElementById('navNext');
+  var btnZoomIn = document.getElementById('btnZoomIn');
+  var btnZoomOut = document.getElementById('btnZoomOut');
+  var btnZoomReset = document.getElementById('btnZoomReset');
+  var loadingOverlay = document.getElementById('loadingOverlay');
+  var loadingText = document.getElementById('loadingText');
+  var penCanvas = document.getElementById('penCanvas');
+  var penCtx = penCanvas.getContext('2d');
+  var btnPenToggle = document.getElementById('btnPenToggle');
+  var btnPenWeight = document.getElementById('btnPenWeight');
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  var pageFlip = null;
+  var numPages = 0;
+  var currentIndex = 0; // 0-based, from StPageFlip
+  var pageAspect = 1;   // single page image width/height
+  var isPreMadeSpread = false; // true when each page image already contains two facing pages
+  var spreadStep = 2;   // how many page images one flip advances
+  var pageImages = [];       // [{src, w, h}, ...], 0-indexed
+  var pageImgMap = new Map(); // pageNumber(1-based) -> <img> element
+
+  // No pdf.js, no live rendering, no per-page canvas sizing math, no
+  // warm-up/eviction/memory-budget scheme, no pathological-page guard —
+  // every page here is a plain pre-rendered image, already embedded (or
+  // already read into a data: URI by the file picker) before the book is
+  // ever built. The browser decodes a JPEG in milliseconds regardless of
+  // how complex the original vector art was; there is no render step left
+  // to be slow. See NEXT-STEPS.md / CHANGELOG.md in this repo for why this
+  // viewer exists alongside the live-PDF one (index-pen.html).
+
+  // ---------------------------------------------------------------------
+  // Pen tool: a stroke-history annotation overlay for live presentations.
+  // Ink lives on #penCanvas (a sibling of #zoomLayer, see the CSS comment)
+  // and clears automatically on any page change — see onPageChanged().
+  // Strokes are stored as fractional (0..1) coordinates relative to the
+  // canvas's own CSS box rather than absolute pixels, so a resize mid-
+  // annotation (window resize, or toggling pen mode after a zoom change)
+  // redraws them in the right place instead of the wrong scale/position.
+  // ---------------------------------------------------------------------
+  var penMode = false;
+  // A nice, legible navy blue — used only when a page has no meaningful
+  // chromatic content for detectDominantColor() to match (pencil sketches,
+  // plain text). Was green (#22c55e); changed on request.
+  var DEFAULT_PEN_COLOR = '#1e3a8a';
+  var PEN_COLOR = DEFAULT_PEN_COLOR;
+  var PEN_WEIGHTS = { thin: 2.5, thick: 6 };
+  var penWeightName = 'thin';
+  var strokeHistory = [];  // { color, width, points: [{fx,fy}, ...] }[]
+  var currentStroke = null;
+  var penPointerId = null;
+
+  var MIN_ZOOM = 1;
+  var MAX_ZOOM = 4;
+  var ZOOM_STEP = 1.5;
+  var zoom = 1;
+  var panX = 0, panY = 0;
+  var recenterOffsetPx = 0; // shifts a lone cover/back-cover page to screen center
+
+  var renderDebounceTimer = null;
+  var resizeDebounceTimer = null;
+
+  var VIEWPORT_PADDING = 28; // keep in sync with #viewport padding above
+
+  // Fit #flipbook to an *exact* pixel box inside #viewport, preserving the
+  // real page aspect ratio. StPageFlip's flipNext()/flipPrev() (the real
+  // animated page-turn) simulate a corner-drag using a hardcoded coordinate
+  // that assumes the book sits flush at the container's left edge —
+  // whenever there's leftover centering slack, that guess misses the page
+  // and flipPrev() silently does nothing. Sizing the container to an exact
+  // multiple of one page's width (worked out from StPageFlip's own internal
+  // centering formula, which differs by mode) keeps that offset at zero.
+  function layoutBookContainer() {
+    if (!numPages) return;
+    var availW = viewportEl.clientWidth - VIEWPORT_PADDING * 2;
+    var availH = viewportEl.clientHeight - VIEWPORT_PADDING * 2;
+    if (availW <= 0 || availH <= 0) return;
+
+    var targetAspect = pageAspect * (isPreMadeSpread ? 3 : 2);
+    var w, h;
+    if (availW / availH > targetAspect) {
+      h = availH;
+      w = h * targetAspect;
+    } else {
+      w = availW;
+      h = w / targetAspect;
+    }
+    flipbookEl.style.width = Math.round(w) + 'px';
+    flipbookEl.style.height = Math.round(h) + 'px';
+    syncPenCanvasBox();
+  }
+
+  // ---------------------------------------------------------------------
+  // Pen tool
+  // ---------------------------------------------------------------------
+  function syncPenCanvasBox() {
+    if (!flipbookEl || !flipbookEl.parentNode) return;
+    var w = flipbookEl.clientWidth, h = flipbookEl.clientHeight;
+    if (w < 1 || h < 1) return;
+
+    var dpr = window.devicePixelRatio || 1;
+    penCanvas.width = Math.round(w * dpr);
+    penCanvas.height = Math.round(h * dpr);
+    penCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    penCtx.lineCap = 'round';
+    penCtx.lineJoin = 'round';
+
+    redrawStrokes();
+  }
+
+  function strokeToPixelPoints(stroke) {
+    var w = penCanvas.clientWidth, h = penCanvas.clientHeight;
+    return stroke.points.map(function (p) { return { x: p.fx * w, y: p.fy * h }; });
+  }
+
+  function drawStroke(stroke) {
+    var pts = strokeToPixelPoints(stroke);
+    if (pts.length < 1) return;
+    penCtx.strokeStyle = stroke.color;
+    penCtx.lineWidth = stroke.width;
+    penCtx.beginPath();
+    penCtx.moveTo(pts[0].x, pts[0].y);
+    if (pts.length === 1) {
+      penCtx.lineTo(pts[0].x + 0.01, pts[0].y + 0.01);
+    } else {
+      for (var i = 1; i < pts.length; i++) penCtx.lineTo(pts[i].x, pts[i].y);
+    }
+    penCtx.stroke();
+  }
+
+  function redrawStrokes() {
+    penCtx.clearRect(0, 0, penCanvas.clientWidth, penCanvas.clientHeight);
+    strokeHistory.forEach(drawStroke);
+  }
+
+  function clearInk() {
+    strokeHistory = [];
+    currentStroke = null;
+    penCtx.clearRect(0, 0, penCanvas.clientWidth, penCanvas.clientHeight);
+  }
+
+  function undoLastStroke() {
+    if (!strokeHistory.length) return;
+    strokeHistory.pop();
+    redrawStrokes();
+  }
+
+  var PEN_INACTIVITY_MS = 10000;
+  var penInactivityTimer = null;
+
+  function clearPenInactivityTimer() {
+    clearTimeout(penInactivityTimer);
+    penInactivityTimer = null;
+  }
+
+  function armPenInactivityTimer() {
+    clearTimeout(penInactivityTimer);
+    penInactivityTimer = setTimeout(function () { setPenMode(false); }, PEN_INACTIVITY_MS);
+  }
+
+  function setPenMode(on) {
+    if (penMode === on) return;
+    penMode = on;
+    penCanvas.classList.toggle('pen-active', on);
+    btnPenToggle.classList.toggle('active', on);
+    if (on) {
+      syncPenCanvasBox();
+      armPenInactivityTimer();
+    } else {
+      clearPenInactivityTimer();
+    }
+  }
+
+  function penPointFromEvent(e) {
+    var rect = penCanvas.getBoundingClientRect();
+    return { fx: (e.clientX - rect.left) / rect.width, fy: (e.clientY - rect.top) / rect.height };
+  }
+
+  penCanvas.addEventListener('pointerdown', function (e) {
+    if (!penMode || penPointerId !== null) return;
+    armPenInactivityTimer();
+    penPointerId = e.pointerId;
+    try { penCanvas.setPointerCapture(e.pointerId); } catch (err) {}
+    currentStroke = { color: PEN_COLOR, width: PEN_WEIGHTS[penWeightName], points: [penPointFromEvent(e)] };
+  });
+
+  penCanvas.addEventListener('pointermove', function (e) {
+    if (e.pointerId !== penPointerId || !currentStroke) return;
+    armPenInactivityTimer();
+    currentStroke.points.push(penPointFromEvent(e));
+    var pts = strokeToPixelPoints(currentStroke);
+    var n = pts.length;
+    if (n < 2) return;
+    penCtx.strokeStyle = currentStroke.color;
+    penCtx.lineWidth = currentStroke.width;
+    penCtx.beginPath();
+    penCtx.moveTo(pts[n - 2].x, pts[n - 2].y);
+    penCtx.lineTo(pts[n - 1].x, pts[n - 1].y);
+    penCtx.stroke();
+  });
+
+  function endPenStroke(e) {
+    if (e.pointerId !== penPointerId) return;
+    armPenInactivityTimer();
+    try { penCanvas.releasePointerCapture(e.pointerId); } catch (err) {}
+    penPointerId = null;
+    if (currentStroke) {
+      if (currentStroke.points.length === 1) drawStroke(currentStroke);
+      strokeHistory.push(currentStroke);
+      currentStroke = null;
+    }
+  }
+  penCanvas.addEventListener('pointerup', endPenStroke);
+  penCanvas.addEventListener('pointercancel', endPenStroke);
+
+  btnPenToggle.addEventListener('click', function () { setPenMode(!penMode); });
+
+  btnPenWeight.addEventListener('click', function () {
+    penWeightName = penWeightName === 'thin' ? 'thick' : 'thin';
+    btnPenWeight.textContent = penWeightName === 'thin' ? 'Thin' : 'Thick';
+  });
+
+  window.addEventListener('keydown', function (e) {
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    var mod = e.ctrlKey || e.metaKey;
+    if (mod && (e.key === 'z' || e.key === 'Z')) {
+      if (!strokeHistory.length) return;
+      e.preventDefault();
+      undoLastStroke();
+      return;
+    }
+    if (!mod && (e.key === 'p' || e.key === 'P')) {
+      if (!numPages) return;
+      e.preventDefault();
+      setPenMode(!penMode);
+    }
+  });
+
+  // ---------------------------------------------------------------------
+  // Loading overlay helpers
+  // ---------------------------------------------------------------------
+  function showLoading(msg) {
+    loadingText.textContent = msg || 'Loading…';
+    loadingOverlay.classList.remove('hidden');
+  }
+  function hideLoading() {
+    loadingOverlay.classList.add('hidden');
+  }
+
+  // ---------------------------------------------------------------------
+  // File / folder selection (dev/testing path — the packaged output uses
+  // EMBEDDED_MANIFEST instead, see bottom of file)
+  // ---------------------------------------------------------------------
+  btnLoad.addEventListener('click', function () { fileInput.click(); });
+  btnLoad2.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function (e) {
+    if (e.target.files && e.target.files.length) loadImageFiles(e.target.files);
+    fileInput.value = '';
+  });
+
+  ['dragenter', 'dragover'].forEach(function (evt) {
+    stage.addEventListener(evt, function (e) { e.preventDefault(); e.stopPropagation(); });
+  });
+  stage.addEventListener('drop', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) loadImageFiles(files);
+  });
+
+  function isImageFile(f) { return /\.(jpe?g|png|webp)$/i.test(f.name); }
+
+  function readImageFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = reject;
+      reader.onload = function () {
+        var img = new Image();
+        img.onerror = reject;
+        img.onload = function () {
+          resolve({ src: reader.result, w: img.naturalWidth, h: img.naturalHeight });
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function loadImageFiles(fileList) {
+    var files = Array.prototype.filter.call(fileList, isImageFile);
+    if (!files.length) {
+      alert('Please choose the page images produced by rasterize-pdf.py.');
+      return;
+    }
+    // Filenames are zero-padded sequential ("page-01.jpg", ...) by
+    // rasterize-pdf.py, so a plain lexicographic sort puts them in order.
+    files.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+    showLoading('Reading ' + files.length + ' images…');
+    Promise.all(files.map(readImageFile)).then(function (images) {
+      initBookFromImages(images);
+    }).catch(function (err) {
+      console.error(err);
+      hideLoading();
+      alert('Could not read one or more of these images.');
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Building / resetting the flipbook for a newly loaded set of pages
+  // ---------------------------------------------------------------------
+  function destroyCurrentBook() {
+    if (pageFlip) {
+      try { pageFlip.destroy(); } catch (e) { /* older builds may lack destroy() */ }
+      pageFlip = null;
+    }
+    // StPageFlip's destroy() removes the element it was constructed on from
+    // the DOM (not just its children) — relying on the original #flipbook
+    // node surviving a load/swap cycle silently breaks loading a second book
+    // (it renders into a detached, invisible node). Always start the next
+    // book on a fresh element instead.
+    var freshFlipbook = document.createElement('div');
+    freshFlipbook.id = 'flipbook';
+    if (flipbookEl.parentNode) {
+      flipbookEl.parentNode.replaceChild(freshFlipbook, flipbookEl);
+    } else {
+      zoomLayer.appendChild(freshFlipbook);
+    }
+    flipbookEl = freshFlipbook;
+    pageImgMap.clear();
+    pageImages = [];
+    numPages = 0;
+    currentIndex = 0;
+    resetZoomState();
+    setPenMode(false);
+    clearInk();
+  }
+
+  function buildPageElements(images) {
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < images.length; i++) {
+      var page = document.createElement('div');
+      page.className = 'pf-page';
+      page.dataset.pageNumber = String(i + 1);
+
+      var inner = document.createElement('div');
+      inner.className = 'pf-page-inner';
+
+      var img = document.createElement('img');
+      img.className = 'page-img';
+      img.decoding = 'async';
+      img.draggable = false;
+      img.alt = 'Page ' + (i + 1);
+      img.src = images[i].src;
+      pageImgMap.set(i + 1, img);
+
+      inner.appendChild(img);
+      page.appendChild(inner);
+      frag.appendChild(page);
+    }
+    flipbookEl.appendChild(frag);
+  }
+
+  function initBookFromImages(images) {
+    destroyCurrentBook();
+    if (!images || !images.length) { hideLoading(); return; }
+    pageImages = images;
+    numPages = images.length;
+
+    var first = images[0];
+    var aspect = first.w / first.h;
+
+    // Some portfolio/export tools bake TWO facing pages into a single wide
+    // image (a pre-made spread) rather than exporting individual pages. If
+    // we then also pair up two of those images side by side, you get 4
+    // sub-pages crammed into view instead of 2. Detect this from the
+    // image's own aspect ratio and show one image at a time instead of
+    // pairing two. Same threshold as index-pen.html's landscape-PDF fix —
+    // deliberately above a genuine landscape single page's aspect (e.g.
+    // 11x8.5in = 1.29) and below an actual pre-combined two-page spread's
+    // (~1.55, two portrait pages side by side).
+    pageAspect = aspect;
+    isPreMadeSpread = aspect > 1.42;
+    spreadStep = isPreMadeSpread ? 1 : 2;
+
+    var baseHeight = 900;
+    var baseWidth = Math.round(baseHeight * aspect);
+
+    buildPageElements(images);
+    layoutBookContainer();
+
+    pageFlip = new PageFlip(flipbookEl, {
+      width: baseWidth,
+      height: baseHeight,
+      size: 'stretch',
+      autoSize: false,
+      minWidth: isPreMadeSpread ? 9000 : 200,
+      maxWidth: isPreMadeSpread ? 12000 : 2200,
+      minHeight: 250,
+      maxHeight: 2800,
+      usePortrait: isPreMadeSpread ? true : false,
+      maxShadowOpacity: 0.5,
+      showCover: !isPreMadeSpread,
+      mobileScrollSupport: false,
+      useMouseEvents: false,
+      disableFlipByClick: true,
+      drawShadow: true,
+      flippingTime: 350
+    });
+
+    pageFlip.loadFromHTML(flipbookEl.querySelectorAll('.pf-page'));
+
+    pageFlip.on('flip', function (e) {
+      currentIndex = e.data;
+      onPageChanged();
+    });
+
+    currentIndex = 0;
+    dropHint.classList.add('hidden');
+    onPageChanged();
+    hideLoading();
+  }
+
+  function updateRecenterOffset() {
+    if (isPreMadeSpread) { recenterOffsetPx = 0; return; }
+    var quarterWidth = flipbookEl.getBoundingClientRect().width / 4;
+    var isLoneBackCover = currentIndex === numPages - 1 && numPages % 2 === 0;
+    if (currentIndex === 0) {
+      recenterOffsetPx = -quarterWidth;
+    } else if (isLoneBackCover) {
+      recenterOffsetPx = quarterWidth;
+    } else {
+      recenterOffsetPx = 0;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Pen color auto-match: sample the currently visible page image(s) and
+  // pick pen ink to match the most prominent *bright, vivid* color on the
+  // page, so e.g. a page with a bright red accent gets red ink even if a
+  // duller color (dark brown wood tones, shadows, etc.) covers more pixels.
+  // ---------------------------------------------------------------------
+  var PEN_SAMPLE_SIZE = 48;
+  var HUE_BUCKETS = 24; // 15° each
+
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    var max = Math.max(r, g, b), min = Math.min(r, g, b);
+    var h = 0, s = 0, l = (max + min) / 2;
+    var d = max - min;
+    if (d !== 0) {
+      s = d / (1 - Math.abs(2 * l - 1));
+      switch (max) {
+        case r: h = 60 * (((g - b) / d) % 6); break;
+        case g: h = 60 * ((b - r) / d + 2); break;
+        case b: h = 60 * ((r - g) / d + 4); break;
+      }
+      if (h < 0) h += 360;
+    }
+    return { h: h, s: s, l: l };
+  }
+
+  function hslToRgb(h, s, l) {
+    var c = (1 - Math.abs(2 * l - 1)) * s;
+    var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+    var m = l - c / 2;
+    var r, g, b;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+    return {
+      r: Math.round((r + m) * 255),
+      g: Math.round((g + m) * 255),
+      b: Math.round((b + m) * 255)
+    };
+  }
+
+  function toHex(n) { return n.toString(16).padStart(2, '0'); }
+
+  // Returns a hex color for the most prominent *bright, vivid* hue on the
+  // given images, or null if the page has no meaningfully colorful content
+  // (e.g. a pure pencil-sketch page), so the caller can fall back to
+  // DEFAULT_PEN_COLOR.
+  //
+  // Selection favors brightness over raw pixel count: each qualifying hue
+  // bucket is scored by avg-lightness * avg-saturation ("vividness"), not
+  // by how many pixels landed in it. Without this, a small dull-brown
+  // dominant region (wood tones, shadows) could win over a smaller but
+  // genuinely vivid accent color just by covering more area — the opposite
+  // of what a presenter wants from an auto-matched pen color. The pixel
+  // filter itself also has a higher lightness floor than a plain
+  // "not-near-black" cutoff would need, specifically to keep dark/muted
+  // tones (dark brown, olive, etc.) out of consideration entirely rather
+  // than just being outscored.
+  function detectDominantColor(images) {
+    var buckets = [];
+    for (var i = 0; i < HUE_BUCKETS; i++) buckets.push({ count: 0, r: 0, g: 0, b: 0 });
+    var off = document.createElement('canvas');
+    off.width = PEN_SAMPLE_SIZE;
+    off.height = PEN_SAMPLE_SIZE;
+    var octx = off.getContext('2d', { willReadFrequently: true });
+    var sawChroma = false;
+
+    images.forEach(function (img) {
+      if (!img || !img.naturalWidth || !img.naturalHeight) return;
+      octx.clearRect(0, 0, PEN_SAMPLE_SIZE, PEN_SAMPLE_SIZE);
+      octx.drawImage(img, 0, 0, PEN_SAMPLE_SIZE, PEN_SAMPLE_SIZE);
+      var data;
+      try { data = octx.getImageData(0, 0, PEN_SAMPLE_SIZE, PEN_SAMPLE_SIZE).data; }
+      catch (e) { return; } // tainted canvas or similar — just skip it
+      for (var p = 0; p < data.length; p += 4) {
+        var a = data[p + 3];
+        if (a < 200) continue;
+        var r = data[p], g = data[p + 1], b = data[p + 2];
+        var hsl = rgbToHsl(r, g, b);
+        // s < 0.35: not saturated enough to be a "color" (paper, ink lines,
+        // shadows). l < 0.20 or l > 0.93: too dark or too light-washed to
+        // ever read as a bright color, regardless of saturation — this is
+        // what keeps dark/muted tones like dark brown out of contention
+        // structurally, not just by being outscored below.
+        if (hsl.s < 0.35 || hsl.l > 0.93 || hsl.l < 0.20) continue;
+        var idx = Math.floor(hsl.h / (360 / HUE_BUCKETS)) % HUE_BUCKETS;
+        var bucket = buckets[idx];
+        bucket.count++;
+        bucket.r += r; bucket.g += g; bucket.b += b;
+        sawChroma = true;
+      }
+    });
+
+    if (!sawChroma) return null;
+
+    var best = null, bestScore = -1;
+    for (var j = 0; j < buckets.length; j++) {
+      var bucket = buckets[j];
+      if (bucket.count < 6) continue; // too little of this hue to be meaningful, not noise
+      var avgR = bucket.r / bucket.count, avgG = bucket.g / bucket.count, avgB = bucket.b / bucket.count;
+      var avgHsl = rgbToHsl(avgR, avgG, avgB);
+      var score = avgHsl.l * avgHsl.s; // vividness: rewards bright AND saturated together
+      if (score > bestScore) { bestScore = score; best = { hsl: avgHsl }; }
+    }
+    if (!best) return null;
+
+    // Clamp the *output ink color's* lightness into a legible band — this
+    // is separate from the selection above (which already picked the most
+    // vivid hue present): a very pale detected hue would otherwise render
+    // as near-invisible ink on white paper, and this keeps the matched hue
+    // while making sure the pen actually shows up.
+    var legibleL = Math.min(Math.max(best.hsl.l, 0.32), 0.58);
+    var rgb = hslToRgb(best.hsl.h, Math.max(best.hsl.s, 0.55), legibleL);
+    return '#' + toHex(rgb.r) + toHex(rgb.g) + toHex(rgb.b);
+  }
+
+  // Pages currently on-screen (not StPageFlip's display:none siblings) —
+  // used for color sampling; matches whatever the reader is looking at
+  // right now, spread or single page alike.
+  function getVisiblePageImages() {
+    var pfPages = flipbookEl.querySelectorAll('.pf-page');
+    var visible = [];
+    for (var i = 0; i < pfPages.length; i++) {
+      var rect = pfPages[i].getBoundingClientRect();
+      if (rect.width > 2 && rect.height > 2) {
+        var img = pfPages[i].querySelector('img');
+        if (img && img.complete && img.naturalWidth) visible.push(img);
+      }
+    }
+    return visible;
+  }
+
+  function updatePenColorForCurrentPage() {
+    var detected = detectDominantColor(getVisiblePageImages());
+    PEN_COLOR = detected || DEFAULT_PEN_COLOR;
+  }
+
+  function updatePageIndicator() {
+    if (!numPages) {
+      pageJumpInput.value = '';
+      pageTotalLabel.textContent = 'of –';
+      return;
+    }
+    pageJumpInput.max = String(numPages);
+    if (document.activeElement !== pageJumpInput) {
+      pageJumpInput.value = String(currentIndex + 1);
+    }
+    pageTotalLabel.textContent = 'of ' + numPages;
+  }
+
+  function isAtEnd() {
+    if (isPreMadeSpread) return currentIndex >= numPages - 1;
+    return currentIndex >= numPages - 2;
+  }
+
+  function updateNavButtons() {
+    var atEnd = isAtEnd();
+    navPrev.disabled = currentIndex <= 0;
+    navNext.disabled = atEnd;
+    btnRestart.classList.toggle('hidden', !atEnd);
+  }
+
+  function onPageChanged() {
+    clearInk(); // every page-change path (flip event, instant jump) runs through here
+    updateRecenterOffset();
+    resetZoomState();
+    syncPenCanvasBox();
+    updatePageIndicator();
+    updateNavButtons();
+    updatePenColorForCurrentPage();
+  }
+
+  // ---------------------------------------------------------------------
+  // Flip navigation (click / tap / buttons / jump-to-page)
+  // ---------------------------------------------------------------------
+  var isTouchPrimary = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+
+  function instantGoToIndex(targetIndex0Based) {
+    if (!pageFlip || !numPages) return;
+    var target = Math.max(0, Math.min(numPages - 1, targetIndex0Based));
+    if (zoom !== 1) resetZoomState();
+    flipbookEl.classList.add('flipping');
+    pageFlip.turnToPage(target);
+    currentIndex = pageFlip.getCurrentPageIndex();
+    onPageChanged();
+    requestAnimationFrame(function () {
+      flipbookEl.classList.remove('flipping');
+    });
+  }
+
+  function flipNext() {
+    if (!pageFlip || isAtEnd()) return;
+    clearInk();
+    if (isTouchPrimary) { instantGoToIndex(currentIndex + spreadStep); return; }
+    if (zoom !== 1) resetZoomState();
+    pageFlip.flipNext();
+  }
+  function flipPrev() {
+    if (!pageFlip || currentIndex <= 0) return;
+    clearInk();
+    if (isTouchPrimary) { instantGoToIndex(currentIndex - spreadStep); return; }
+    if (zoom !== 1) resetZoomState();
+    pageFlip.flipPrev();
+  }
+  navNext.addEventListener('click', flipNext);
+  navPrev.addEventListener('click', flipPrev);
+
+  function goToPage(pageNumber1Based) {
+    instantGoToIndex(Math.round(pageNumber1Based) - 1);
+  }
+
+  var jumpHandledByEnter = false;
+  pageJumpInput.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    var val = parseInt(pageJumpInput.value, 10);
+    if (!isNaN(val)) goToPage(val);
+    jumpHandledByEnter = true;
+    pageJumpInput.blur();
+  });
+  pageJumpInput.addEventListener('blur', function () {
+    if (jumpHandledByEnter) { jumpHandledByEnter = false; return; }
+    var val = parseInt(pageJumpInput.value, 10);
+    if (!isNaN(val)) goToPage(val);
+    else updatePageIndicator();
+  });
+
+  btnRestart.addEventListener('click', function () { goToPage(1); });
+
+  // ---------------------------------------------------------------------
+  // Zoom core
+  // ---------------------------------------------------------------------
+  function clampPan(z) {
+    var rect = viewportEl.getBoundingClientRect();
+    var maxX = (rect.width * (z - 1)) / 2;
+    var maxY = (rect.height * (z - 1)) / 2;
+    panX = Math.max(-maxX, Math.min(maxX, panX));
+    panY = Math.max(-maxY, Math.min(maxY, panY));
+  }
+
+  function applyTransform() {
+    zoomLayer.style.transform = 'translate(' + (panX + recenterOffsetPx) + 'px,' + panY + 'px) scale(' + zoom + ')';
+  }
+
+  function resetZoomState() {
+    zoom = 1; panX = 0; panY = 0;
+    zoomLayer.classList.remove('dragging');
+    zoomLayer.classList.add('animated');
+    applyTransform();
+    updateZoomUi();
+  }
+
+  function updateZoomUi() {
+    btnZoomReset.textContent = Math.round(zoom * 100) + '%';
+    btnZoomOut.disabled = zoom <= MIN_ZOOM + 0.001;
+    btnZoomIn.disabled = zoom >= MAX_ZOOM - 0.001;
+    viewportEl.classList.toggle('zoomed', zoom > 1);
+  }
+
+  function setZoom(newZoom, animate) {
+    if (!numPages) return;
+    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+    if (newZoom === zoom) return;
+    zoom = newZoom;
+    clampPan(zoom);
+    zoomLayer.classList.toggle('animated', !!animate);
+    applyTransform();
+    updateZoomUi();
+  }
+
+  function zoomBy(factor, animate) {
+    setZoom(zoom * factor, animate !== false);
+  }
+
+  function zoomAtClientPoint(newZoom, clientX, clientY, animate) {
+    if (!numPages) return;
+    newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
+    if (newZoom === zoom) return;
+
+    if (newZoom <= MIN_ZOOM + 0.0001) {
+      panX = 0;
+      panY = 0;
+    } else {
+      var rect = viewportEl.getBoundingClientRect();
+      var cx = clientX - (rect.left + rect.width / 2);
+      var cy = clientY - (rect.top + rect.height / 2);
+      var r = newZoom / zoom;
+      panX = (cx - recenterOffsetPx) * (1 - r) + r * panX;
+      panY = cy * (1 - r) + r * panY;
+    }
+
+    zoom = newZoom;
+    clampPan(zoom);
+    zoomLayer.classList.toggle('animated', !!animate);
+    applyTransform();
+    updateZoomUi();
+  }
+
+  btnZoomIn.addEventListener('click', function () { zoomBy(ZOOM_STEP, true); });
+  btnZoomOut.addEventListener('click', function () { zoomBy(1 / ZOOM_STEP, true); });
+  btnZoomReset.addEventListener('click', function () {
+    zoom = 1; panX = 0; panY = 0;
+    zoomLayer.classList.add('animated');
+    applyTransform();
+    updateZoomUi();
+  });
+
+  // ---------------------------------------------------------------------
+  // Keyboard shortcuts: Ctrl/Cmd + / - / 0 zoom the flipbook, not the page
+  // ---------------------------------------------------------------------
+  window.addEventListener('keydown', function (e) {
+    if (penMode) return;
+    var mod = e.ctrlKey || e.metaKey;
+    if (!mod) return;
+    if (e.key === '+' || e.key === '=' || e.code === 'NumpadAdd') {
+      e.preventDefault();
+      zoomBy(ZOOM_STEP, true);
+    } else if (e.key === '-' || e.key === '_' || e.code === 'NumpadSubtract') {
+      e.preventDefault();
+      zoomBy(1 / ZOOM_STEP, true);
+    } else if (e.key === '0' || e.code === 'Numpad0') {
+      e.preventDefault();
+      btnZoomReset.click();
+    }
+  }, { passive: false });
+
+  window.addEventListener('keydown', function (e) {
+    if (!numPages) return;
+    var tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      flipNext();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      flipPrev();
+    }
+  });
+
+  viewportEl.addEventListener('wheel', function (e) {
+    if (!numPages || penMode) return;
+    if (e.ctrlKey) {
+      e.preventDefault();
+      var factor = Math.exp(-e.deltaY * 0.01);
+      zoomAtClientPoint(zoom * factor, e.clientX, e.clientY, false);
+      return;
+    }
+    if (zoom > 1) {
+      e.preventDefault();
+      panX -= e.deltaX;
+      panY -= e.deltaY;
+      clampPan(zoom);
+      zoomLayer.classList.remove('animated');
+      applyTransform();
+    }
+  }, { passive: false });
+
+  var gestureStartZoom = 1;
+  document.addEventListener('gesturestart', function (e) {
+    if (penMode) return;
+    e.preventDefault();
+    gestureStartZoom = zoom;
+  });
+  document.addEventListener('gesturechange', function (e) {
+    if (penMode) return;
+    e.preventDefault();
+    if (!numPages) return;
+    zoomAtClientPoint(gestureStartZoom * e.scale, e.clientX, e.clientY, false);
+  });
+  document.addEventListener('gestureend', function (e) {
+    if (penMode) return;
+    e.preventDefault();
+  });
+
+  // ---------------------------------------------------------------------
+  // Unified pointer handling: tap-to-flip, pinch-to-zoom, drag-to-pan
+  // ---------------------------------------------------------------------
+  var pointers = new Map();
+  var pinch = null;
+  var pan = null;
+  var tap = null;
+  var TAP_MOVE_THRESHOLD = 10;
+  var TAP_TIME_THRESHOLD = 400;
+
+  function pointerArray() {
+    return Array.from(pointers.values());
+  }
+
+  function distanceAndCenter(pts) {
+    var dx = pts[0].x - pts[1].x, dy = pts[0].y - pts[1].y;
+    return {
+      dist: Math.sqrt(dx * dx + dy * dy),
+      cx: (pts[0].x + pts[1].x) / 2,
+      cy: (pts[0].y + pts[1].y) / 2
+    };
+  }
+
+  viewportEl.addEventListener('pointerdown', function (e) {
+    if (!numPages || penMode) return;
+    try { viewportEl.setPointerCapture(e.pointerId); } catch (err) {}
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    zoomLayer.classList.remove('animated');
+    zoomLayer.classList.add('dragging');
+
+    if (pointers.size === 1) {
+      tap = { x: e.clientX, y: e.clientY, t: Date.now(), moved: false };
+      if (zoom > 1) {
+        pan = { startX: e.clientX, startY: e.clientY, startPanX: panX, startPanY: panY };
+      } else {
+        pan = null;
+      }
+    } else if (pointers.size === 2) {
+      tap = null;
+      pan = null;
+      var pts = pointerArray();
+      var dc = distanceAndCenter(pts);
+      pinch = { startDist: dc.dist, startZoom: zoom, startPanX: panX, startPanY: panY };
+    }
+  });
+
+  viewportEl.addEventListener('pointermove', function (e) {
+    if (penMode || !pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (pointers.size === 2 && pinch) {
+      var pts = pointerArray();
+      var dc = distanceAndCenter(pts);
+      var newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, pinch.startZoom * (dc.dist / pinch.startDist)));
+      zoom = newZoom;
+      clampPan(zoom);
+      applyTransform();
+      updateZoomUi();
+      if (tap) tap.moved = true;
+    } else if (pointers.size === 1 && pan) {
+      var dx = e.clientX - pan.startX;
+      var dy = e.clientY - pan.startY;
+      panX = pan.startPanX + dx;
+      panY = pan.startPanY + dy;
+      clampPan(zoom);
+      applyTransform();
+      if (tap && (Math.abs(dx) > TAP_MOVE_THRESHOLD || Math.abs(dy) > TAP_MOVE_THRESHOLD)) tap.moved = true;
+    } else if (pointers.size === 1 && tap) {
+      var mdx = e.clientX - tap.x, mdy = e.clientY - tap.y;
+      if (Math.abs(mdx) > TAP_MOVE_THRESHOLD || Math.abs(mdy) > TAP_MOVE_THRESHOLD) tap.moved = true;
+    }
+  });
+
+  function endPointer(e) {
+    var wasPinching = pointers.size === 2;
+    pointers.delete(e.pointerId);
+
+    if (pointers.size < 2 && pinch) {
+      pinch = null;
+    }
+
+    if (pointers.size === 0) {
+      zoomLayer.classList.remove('dragging');
+      zoomLayer.classList.add('animated');
+
+      if (!wasPinching && pan) {
+        pan = null;
+      } else if (tap && !tap.moved && zoom === 1 && (Date.now() - tap.t) < TAP_TIME_THRESHOLD) {
+        var rect = viewportEl.getBoundingClientRect();
+        var relX = tap.x - rect.left;
+        if (relX < rect.width / 2) {
+          flipPrev();
+        } else {
+          flipNext();
+        }
+      }
+      tap = null;
+      pan = null;
+    }
+  }
+
+  viewportEl.addEventListener('pointerup', endPointer);
+  viewportEl.addEventListener('pointercancel', endPointer);
+
+  // ---------------------------------------------------------------------
+  // Resize handling: re-fit #flipbook's exact size. No re-render needed —
+  // unlike the live-PDF viewer, page images are already at their full
+  // native (rasterize-pdf.py) resolution and the browser just rescales
+  // them via CSS, cheaply, regardless of window size or zoom level.
+  // ---------------------------------------------------------------------
+  window.addEventListener('resize', function () {
+    if (pageFlip) layoutBookContainer();
+  });
+
+  // ---------------------------------------------------------------------
+  // Prevent the whole document from being zoomed/scrolled by stray gestures
+  // ---------------------------------------------------------------------
+  document.addEventListener('touchmove', function (e) {
+    if (e.scale && e.scale !== 1) e.preventDefault();
+  }, { passive: false });
+
+  // ---------------------------------------------------------------------
+  // Auto-load the bundled pages, if this file was produced by
+  // build-static-flipbook.py (EMBEDDED_MANIFEST non-null in that case).
+  // ---------------------------------------------------------------------
+  if (EMBEDDED_MANIFEST && EMBEDDED_MANIFEST.length) {
+    showLoading('Loading portfolio…');
+    initBookFromImages(EMBEDDED_MANIFEST);
+  }
+
+})();
+  </script>
+</body>
+</html>
