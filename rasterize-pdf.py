@@ -8,14 +8,16 @@ has to decode a plain image per page instead of interpreting PDF content
 live -- see NEXT-STEPS.md for why.
 
 Usage:
-    python3 rasterize-pdf.py input.pdf [output_dir] [--dpi 300] [--format jpg] [--quality 92]
+    python3 rasterize-pdf.py input.pdf [output_dir] [--dpi 400] [--format jpg] [--quality 92]
 
-Defaults: output_dir = "<pdf-name>-pages" next to the input file, 300 DPI,
-JPEG at quality 92. 300 DPI is the low end of the "crisp linework" target
-range (300-400) -- it's the standard "print quality" threshold and produces
-noticeably smaller files than 400 DPI with no visible softness on typical
-portfolio-page line weights viewed at normal flipbook zoom. Bump to 400 DPI
-for a page you plan to zoom into heavily.
+Defaults: output_dir = "<pdf-name>-pages" next to the input file, 400 DPI,
+JPEG at quality 92. The viewer's max in-app zoom is 4x (see MAX_ZOOM in
+index-pen-static.html); 300 DPI looks fine at the normal flipbook view but
+visibly softens once zoomed in near that ceiling. 400 DPI was confirmed
+(side-by-side, same page, same 4x zoom) to fix that softness, at roughly
+2x the file size of 300 DPI. 600 DPI was also tried and didn't look
+meaningfully crisper than 400 in that same comparison, while nearly
+doubling file size again -- not worth it. 400 is the sweet spot.
 """
 
 import argparse
@@ -79,7 +81,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("pdf", type=Path, help="Path to the source PDF")
     parser.add_argument("out_dir", type=Path, nargs="?", default=None, help="Output folder (default: <pdf-name>-pages)")
-    parser.add_argument("--dpi", type=int, default=300, help="Render DPI (default: 300; try 400 for max crispness)")
+    parser.add_argument("--dpi", type=int, default=400, help="Render DPI (default: 400 -- stays crisp at the viewer's 4x max zoom; see module docstring)")
     parser.add_argument("--format", choices=["jpg", "png"], default="jpg", help="Image format (default: jpg)")
     parser.add_argument("--quality", type=int, default=92, help="JPEG quality 0-100 (default: 92; ignored for png)")
     args = parser.parse_args()

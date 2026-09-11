@@ -49,7 +49,7 @@ build_static_flipbook = _load_module("build_static_flipbook", "build-static-flip
 
 
 APP_TITLE = "Flipbook Rasterizer"
-DEFAULT_DPI = 300  # matches rasterize-pdf.py's own default -- see that file for why
+DEFAULT_DPI = 400  # matches rasterize-pdf.py's own default -- see that file for why
 
 
 BG = "#f4f4f2"  # explicit light background -- tkinter on macOS otherwise

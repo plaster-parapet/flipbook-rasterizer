@@ -13,7 +13,7 @@ rendered live in the visitor's browser.
 
 Usage:
     # From a PDF directly (rasterizes it first):
-    python3 build-static-flipbook.py input.pdf [output.html] [--dpi 300] [--format jpg] [--quality 92]
+    python3 build-static-flipbook.py input.pdf [output.html] [--dpi 400] [--format jpg] [--quality 92]
 
     # From an already-rasterized folder (e.g. one you inspected/reused from
     # a prior rasterize-pdf.py run):
@@ -121,7 +121,7 @@ def main():
     parser.add_argument("pdf", type=Path, nargs="?", help="Path to the source PDF (omit if using --images-dir)")
     parser.add_argument("output", type=Path, nargs="?", default=None, help="Output .html path (default: <name>-flipbook.html)")
     parser.add_argument("--images-dir", type=Path, default=None, help="Use an already-rasterized folder instead of a PDF")
-    parser.add_argument("--dpi", type=int, default=300, help="Render DPI when rasterizing a PDF (default: 300)")
+    parser.add_argument("--dpi", type=int, default=400, help="Render DPI when rasterizing a PDF (default: 400 -- see rasterize-pdf.py's docstring)")
     parser.add_argument("--format", choices=["jpg", "png"], default="jpg", help="Image format when rasterizing a PDF (default: jpg)")
     parser.add_argument("--quality", type=int, default=92, help="JPEG quality when rasterizing a PDF (default: 92)")
     parser.add_argument("--no-keep-images", action="store_true", help="Delete the intermediate rasterized-images folder after packaging (default: keep it)")
